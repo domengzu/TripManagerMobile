@@ -4,14 +4,14 @@
 export const API_CONFIG = {
   // Update this URL to match your Laravel server
   // For local development:
-  BASE_URL: 'http://192.168.1.5:8000/api', // Replace with your actual IP
+  // BASE_URL: 'http://192.168.1.5:8000/api', // Replace with your actual IP
   
   // Alternative URLs to try if the above doesn't work:
   // BASE_URL: 'http://localhost:8000/api', // If testing on same machine
   // BASE_URL: 'http://127.0.0.1:8000/api', // Alternative localhost
   
   // For production:
-  // BASE_URL: 'https://your-production-domain.com/api',
+  BASE_URL: 'https://tripmanager.site/api',
   
   // Request timeout in milliseconds
   TIMEOUT: 30000,
