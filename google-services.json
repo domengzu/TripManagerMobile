@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "744564625005",
+    "project_id": "tripmanager-1b514",
+    "storage_bucket": "tripmanager-1b514.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:744564625005:android:919e20b367b45bf1fd7964",
+        "android_client_info": {
+          "package_name": "com.tripmanager.app"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "744564625005-vuc9iicmd0dp6h7f2mop4imdiec5635i.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCskqHN-R6D2t668ZZSSmzlwa8BcXEljdY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "744564625005-vuc9iicmd0dp6h7f2mop4imdiec5635i.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
