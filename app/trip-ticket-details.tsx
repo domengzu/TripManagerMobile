@@ -6,6 +6,9 @@ import {
   ScrollView,
   TouchableOpacity,
   Alert,
+  Modal,
+  TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { TripTicket } from '@/types';
@@ -21,6 +24,19 @@ export default function TripTicketDetailsScreen() {
   const [tripTicket, setTripTicket] = useState<TripTicket | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  
+  // Cancellation modal state
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancellationReason, setCancellationReason] = useState('');
+  const [isCancelling, setIsCancelling] = useState(false);
+
+  // Odometer and fuel tracking state
+  const [showStartModal, setShowStartModal] = useState(false);
+  const [showCompleteModal, setShowCompleteModal] = useState(false);
+  const [odometerStart, setOdometerStart] = useState('');
+  const [odometerEnd, setOdometerEnd] = useState('');
+  const [fuelUsed, setFuelUsed] = useState('');
+  const [completionNotes, setCompletionNotes] = useState('');
 
   const {
     confirmationState,
@@ -76,7 +92,7 @@ export default function TripTicketDetailsScreen() {
       console.log('� Director/Approver:', ticketData?.travelRequest?.approver);
       console.log('📊 Travel Request Status:', ticketData?.travelRequest?.status);
       console.log('📝 Issued By:', ticketData?.issuedBy);
-      console.log('✅ Procurement Approved By:', ticketData?.procurementApprovedBy);
+      // Procurement approval workflow removed
       console.log('🚗 Vehicle:', ticketData?.vehicle);
       console.log('👨‍✈️ Driver:', ticketData?.driver);
       console.log('🎯 Purpose:', ticketData?.travelRequest?.purpose);
@@ -90,10 +106,14 @@ export default function TripTicketDetailsScreen() {
       setTripTicket(ticketData);
     } catch (error: any) {
       console.error('Failed to load trip ticket:', error);
-      const errorMessage = error.response?.data?.message || error.message || 'Failed to load trip ticket details';
-      setError(errorMessage);
       
-      // Don't automatically go back, let user decide
+      // Check if trip ticket was deleted (404 error)
+      if (error.response?.status === 404) {
+        setError('This trip ticket has been cancelled or removed. It may have been undone by the director.');
+      } else {
+        const errorMessage = error.response?.data?.message || error.message || 'Failed to load trip ticket details';
+        setError(errorMessage);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -146,100 +166,187 @@ export default function TripTicketDetailsScreen() {
       return;
     }
 
-    // If it's the travel date or past, show reminder/confirmation
-    const isToday = travelDate.getTime() === today.getTime();
-    const isPastDue = travelDate < today;
-    
-    let confirmationMessage = '';
-    if (isToday) {
-      confirmationMessage = `✅ Today is your scheduled travel date!\n\nAre you sure you want to start this trip to ${destination}? This will activate GPS tracking and trip logging.`;
-    } else if (isPastDue) {
-      const daysOverdue = Math.ceil((today.getTime() - travelDate.getTime()) / (1000 * 60 * 60 * 24));
-      confirmationMessage = `⚠️ This trip was scheduled for ${daysOverdue} day${daysOverdue > 1 ? 's' : ''} ago.\n\nAre you sure you want to start this trip to ${destination}? This will activate GPS tracking and trip logging.`;
-    }
+    // Show odometer input modal
+    setOdometerStart('');
+    setShowStartModal(true);
+  };
 
-    showConfirmation({
-      title: isToday ? 'Ready to Start Trip' : 'Start Trip',
-      message: confirmationMessage,
-      type: 'info',
-      confirmText: 'Start Trip',
-      cancelText: 'Cancel',
-      onConfirm: async () => {
-        try {
-          await ApiService.startTrip(tripTicket.id);
-          
-          // Create notification for trip started
-          notificationService.createTripStartedNotification(
-            tripTicket.id, 
-            destination
-          );
-          
-          showSuccess({
-            title: 'Trip Started',
-            message: 'Trip has been started successfully! GPS tracking is now active.',
-            autoClose: true,
-            autoCloseDelay: 2000
-          });
-          
-          // Navigate to trips screen after a short delay to allow success message to show
-          setTimeout(() => {
-            router.push('/trips?startTracking=true');
-          }, 2200);
-          
-        } catch (error) {
-          showConfirmation({
-            title: 'Error',
-            message: 'Failed to start trip. Please try again.',
-            type: 'danger',
-            confirmText: 'OK',
-            onConfirm: () => hideConfirmation()
-          });
+  const confirmStartTrip = async () => {
+    if (!tripTicket) return;
+
+    const destination = Array.isArray(tripTicket.travelRequest?.destinations) 
+      ? tripTicket.travelRequest.destinations.join(', ')
+      : tripTicket.travelRequest?.destinations;
+
+    try {
+      const data: any = {};
+      
+      // Add odometer reading if provided
+      if (odometerStart && odometerStart.trim() !== '') {
+        const odometerValue = parseFloat(odometerStart);
+        if (isNaN(odometerValue) || odometerValue < 0) {
+          Alert.alert('Invalid Input', 'Please enter a valid odometer reading');
+          return;
         }
+        data.odometer_start = odometerValue;
       }
-    });
+
+      await ApiService.startTrip(tripTicket.id, data);
+      
+      // Create notification for trip started
+      notificationService.createTripStartedNotification(
+        tripTicket.id, 
+        destination
+      );
+      
+      setShowStartModal(false);
+      
+      showSuccess({
+        title: 'Trip Started',
+        message: 'Trip has been started successfully! GPS tracking is now active.',
+        autoClose: true,
+        autoCloseDelay: 2000
+      });
+      
+      // Navigate to trips screen after a short delay to allow success message to show
+      setTimeout(() => {
+        router.push('/trips?startTracking=true');
+      }, 2200);
+      
+    } catch (error) {
+      setShowStartModal(false);
+      showConfirmation({
+        title: 'Error',
+        message: 'Failed to start trip. Please try again.',
+        type: 'danger',
+        confirmText: 'OK',
+        onConfirm: () => hideConfirmation()
+      });
+    }
   };
 
   const handleCompleteTrip = async () => {
     if (!tripTicket) return;
     
-    Alert.alert(
-      'Complete Trip',
-      'Are you sure you want to mark this trip as completed?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Complete',
-          onPress: async () => {
-            try {
-              await ApiService.completeTrip(tripTicket.id);
-              
-              // Create notification for trip completed
-              const destination = Array.isArray(tripTicket.travelRequest?.destinations) 
-                ? tripTicket.travelRequest.destinations.join(', ')
-                : tripTicket.travelRequest?.destinations;
-              
-              notificationService.createTripCompletedNotification(
-                tripTicket.id, 
-                destination
-              );
-              
-              Alert.alert('Success', 'Trip completed successfully');
-              loadTripTicket(); // Reload to get updated status
-            } catch (error) {
-              Alert.alert('Error', 'Failed to complete trip');
-            }
-          },
-        },
-      ]
-    );
+    // Show modal for odometer end and fuel used input
+    setOdometerEnd('');
+    setFuelUsed('');
+    setCompletionNotes('');
+    setShowCompleteModal(true);
   };
 
-  const getStatusColor = (status: string, procurementStatus?: string) => {
-    // If procurement is cancelled, show cancelled status
-    if (procurementStatus === 'cancelled' || procurementStatus === 'canceled') {
-      return '#dc2626';  // Red-600 - cancelled
+  const confirmCompleteTrip = async () => {
+    if (!tripTicket) return;
+
+    try {
+      const data: any = {};
+
+      // Add odometer end reading if provided
+      if (odometerEnd && odometerEnd.trim() !== '') {
+        const odometerValue = parseFloat(odometerEnd);
+        if (isNaN(odometerValue) || odometerValue < 0) {
+          Alert.alert('Invalid Input', 'Please enter a valid ending odometer reading');
+          return;
+        }
+        
+        // Validate that end odometer is greater than start if both exist
+        if (tripTicket.odometer_start && odometerValue < tripTicket.odometer_start) {
+          Alert.alert('Invalid Input', `Ending odometer (${odometerValue} km) must be greater than starting odometer (${tripTicket.odometer_start} km)`);
+          return;
+        }
+        
+        data.odometer_end = odometerValue;
+      }
+
+      // Add fuel used if provided
+      if (fuelUsed && fuelUsed.trim() !== '') {
+        const fuelValue = parseFloat(fuelUsed);
+        if (isNaN(fuelValue) || fuelValue < 0) {
+          Alert.alert('Invalid Input', 'Please enter a valid fuel amount');
+          return;
+        }
+        data.fuel_used = fuelValue;
+      }
+
+      // Add completion notes if provided
+      if (completionNotes && completionNotes.trim() !== '') {
+        data.completion_notes = completionNotes;
+      }
+
+      await ApiService.completeTrip(tripTicket.id, data);
+      
+      // Create notification for trip completed
+      const destination = Array.isArray(tripTicket.travelRequest?.destinations) 
+        ? tripTicket.travelRequest.destinations.join(', ')
+        : tripTicket.travelRequest?.destinations;
+      
+      notificationService.createTripCompletedNotification(
+        tripTicket.id, 
+        destination
+      );
+      
+      setShowCompleteModal(false);
+      
+      showSuccess({
+        title: 'Trip Completed',
+        message: 'Trip has been completed successfully!',
+        autoClose: true,
+        autoCloseDelay: 2000
+      });
+
+      // Reload trip ticket after a short delay
+      setTimeout(() => {
+        loadTripTicket();
+      }, 2200);
+      
+    } catch (error) {
+      setShowCompleteModal(false);
+      Alert.alert('Error', 'Failed to complete trip. Please try again.');
     }
-    
+  };
+
+  const handleCancelTrip = () => {
+    setCancellationReason('');
+    setShowCancelModal(true);
+  };
+
+  const confirmCancelTrip = async () => {
+    if (!tripTicket) return;
+
+    if (!cancellationReason.trim()) {
+      Alert.alert('Error', 'Please provide a reason for cancellation');
+      return;
+    }
+
+    setIsCancelling(true);
+    try {
+      await ApiService.cancelTripEmergency(tripTicket.id, cancellationReason.trim());
+      
+      showSuccess({
+        title: 'Trip Cancelled',
+        message: 'Trip has been cancelled successfully. Director has been notified.',
+        autoClose: true,
+        autoCloseDelay: 3000
+      });
+
+      setShowCancelModal(false);
+      setCancellationReason('');
+      
+      // Navigate back after a short delay
+      setTimeout(() => {
+        router.back();
+      }, 3200);
+    } catch (error: any) {
+      Alert.alert(
+        'Error',
+        error.response?.data?.message || 'Failed to cancel trip. Please try again.'
+      );
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
+  const getStatusColor = (status: string) => {
     switch (status) {
       case 'active':
         return '#65676B';  // TripManager gray-500 - awaiting procurement
@@ -257,12 +364,7 @@ export default function TripTicketDetailsScreen() {
     }
   };
 
-  const getStatusText = (status: string, procurementStatus?: string) => {
-    // If procurement is cancelled, show cancelled status
-    if (procurementStatus === 'cancelled' || procurementStatus === 'canceled') {
-      return 'Cancelled';
-    }
-    
+  const getStatusText = (status: string) => {
     switch (status) {
       case 'active':
         return 'Awaiting Approval';
@@ -281,31 +383,7 @@ export default function TripTicketDetailsScreen() {
     }
   };
 
-  const getProcurementStatusColor = (status: string) => {
-    switch (status) {
-      case 'approved':
-        return '#10b981';  // Emerald-500 - approved
-      case 'pending':
-        return '#C28F22';  // TripManager secondary brand color - pending
-      case 'cancelled':
-        return '#dc2626';  // Red-600 - cancelled
-      default:
-        return '#65676B';  // TripManager gray-500
-    }
-  };
-
-  const getProcurementStatusText = (status: string) => {
-    switch (status) {
-      case 'approved':
-        return '✓ Approved by Procurement';
-      case 'pending':
-        return '⏳ Awaiting Procurement Approval';
-      case 'cancelled':
-        return '✗ Cancelled by Procurement';
-      default:
-        return 'Unknown Status';
-    }
-  };
+  // Procurement status functions removed - procurement no longer reviews trips
 
   const getDirectorStatusColor = (status?: string) => {
     switch (status) {
@@ -363,18 +441,17 @@ export default function TripTicketDetailsScreen() {
   }
 
   if (error) {
+    const isDeleted = error.includes('cancelled') || error.includes('removed') || error.includes('undone');
     return (
       <View style={styles.errorContainer}>
-        <View style={styles.errorNotification}>
-          <Ionicons name="alert-circle" size={20} color="#ef4444" />
-          <Text style={styles.errorText}>{error}</Text>
-        </View>
+        <Ionicons name={isDeleted ? "close-circle-outline" : "alert-circle-outline"} size={64} color="#ef4444" style={{ marginBottom: 16 }} />
+        <Text style={[styles.errorNotificationText, { textAlign: 'center', fontSize: 16, marginBottom: 20 }]}>{error}</Text>
         <View style={styles.errorButtons}>
-          <TouchableOpacity style={styles.retryButton} onPress={loadTripTicket}>
-            <Text style={styles.retryButtonText}>Retry</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-            <Text style={styles.backButtonText}>Go Back</Text>
+          <TouchableOpacity 
+            style={styles.retryButton} 
+            onPress={isDeleted ? () => router.back() : loadTripTicket}
+          >
+            <Text style={styles.retryButtonText}>{isDeleted ? 'Go Back' : 'Retry'}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -406,8 +483,8 @@ export default function TripTicketDetailsScreen() {
           <Text style={styles.subtitle}>Trip Ticket Details</Text>
         </View>
         <View style={styles.headerStatusBadge}>
-          <View style={[styles.miniStatusBadge, { backgroundColor: getStatusColor(tripTicket.status, tripTicket.procurement_status) }]}>
-            <Text style={styles.miniStatusText}>{getStatusText(tripTicket.status, tripTicket.procurement_status).split(' ')[0]}</Text>
+          <View style={[styles.miniStatusBadge, { backgroundColor: getStatusColor(tripTicket.status) }]}>
+            <Text style={styles.miniStatusText}>{getStatusText(tripTicket.status).split(' ')[0]}</Text>
           </View>
         </View>
       </View>
@@ -438,16 +515,10 @@ export default function TripTicketDetailsScreen() {
       <View style={styles.statusCard}>
         <View style={styles.statusHeader}>
           <Text style={styles.statusLabel}>Status</Text>
-          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(tripTicket.status, tripTicket.procurement_status) }]}>
-            <Text style={styles.statusText}>{getStatusText(tripTicket.status, tripTicket.procurement_status)}</Text>
+          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(tripTicket.status) }]}>
+            <Text style={styles.statusText}>{getStatusText(tripTicket.status)}</Text>
           </View>
         </View>
-        
-        {tripTicket.procurement_status && (
-          <Text style={styles.procurementStatus}>
-            Procurement: {tripTicket.procurement_status.charAt(0).toUpperCase() + tripTicket.procurement_status.slice(1)}
-          </Text>
-        )}
       </View>
 
       {/* Trip Ticket Card */}
@@ -502,46 +573,7 @@ export default function TripTicketDetailsScreen() {
         </View>
       </View>
 
-      {/* Procurement Status Card */}
-      <View style={styles.detailsCard}>
-        <Text style={styles.cardTitle}>Procurement Status</Text>
-        
-        <View style={styles.procurementStatusContainer}>
-          <View style={[
-            styles.procurementStatusBadge, 
-            { backgroundColor: getProcurementStatusColor(tripTicket.procurement_status) }
-          ]}>
-            <Text style={styles.procurementStatusText}>
-              {getProcurementStatusText(tripTicket.procurement_status)}
-            </Text>
-          </View>
-        </View>
-        
-        {tripTicket.procurement_approved_by && (
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Reviewed By</Text>
-            <Text style={styles.detailValue}>
-              {tripTicket.procurementApprovedBy?.name || 'N/A'}
-            </Text>
-          </View>
-        )}
-        
-        {tripTicket.procurement_approved_at && (
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>
-              {tripTicket.procurement_status === 'approved' ? 'Approved On' : 'Reviewed On'}
-            </Text>
-            <Text style={styles.detailValue}>{formatDateTime(tripTicket.procurement_approved_at)}</Text>
-          </View>
-        )}
-        
-        {tripTicket.procurement_notes && (
-          <View style={styles.notesContainer}>
-            <Text style={styles.notesLabel}>Notes:</Text>
-            <Text style={styles.notesText}>{tripTicket.procurement_notes}</Text>
-          </View>
-        )}
-      </View>
+      {/* Procurement Status Card - Removed: Procurement no longer approves trips */}
 
       {/* Director Approval Status Card */}
       <View style={styles.detailsCard}>
@@ -753,14 +785,22 @@ export default function TripTicketDetailsScreen() {
       {/* Action Buttons */}
       <View style={styles.actionsCard}>
         {tripTicket.status === 'ready_for_trip' && 
-         tripTicket.procurement_status === 'approved' && 
          tripTicket.travelRequest?.status === 'approved' && (
-          <TouchableOpacity style={styles.startButton} onPress={handleStartTrip}>
-            <View style={styles.buttonContent}>
-              <Ionicons name="car" size={20} color="white" />
-              <Text style={styles.startButtonText}>Start Trip</Text>
-            </View>
-          </TouchableOpacity>
+          <View style={styles.actionButtonsRow}>
+            <TouchableOpacity style={styles.startButton} onPress={handleStartTrip}>
+              <View style={styles.buttonContent}>
+                <Ionicons name="car" size={20} color="white" />
+                <Text style={styles.startButtonText}>Start Trip</Text>
+              </View>
+            </TouchableOpacity>
+            
+            <TouchableOpacity style={styles.cancelTripButton} onPress={handleCancelTrip}>
+              <View style={styles.buttonContent}>
+                <Ionicons name="close-circle" size={20} color="white" />
+                <Text style={styles.cancelTripButtonText}>Report Issue</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
         )}
         
         {tripTicket.travelRequest?.status === 'rejected' && (
@@ -776,18 +816,7 @@ export default function TripTicketDetailsScreen() {
           </View>
         )}
         
-        {tripTicket.status === 'active' && tripTicket.procurement_status === 'cancelled' && (
-          <View style={styles.rejectedIndicator}>
-            <View style={styles.rejectedContainer}>
-              <Ionicons name="close-circle" size={20} color="#ef4444" />
-              <Text style={styles.rejectedText}>Trip Cancelled by Procurement</Text>
-            </View>
-            <Text style={styles.rejectedSubtext}>This trip has been cancelled by procurement and cannot be started.</Text>
-            {tripTicket.procurement_notes && (
-              <Text style={styles.rejectedReason}>Reason: {tripTicket.procurement_notes}</Text>
-            )}
-          </View>
-        )}
+        {/* Procurement cancelled check removed - procurement no longer reviews trips */}
         
         {tripTicket.travelRequest?.status === 'pending' && (
           <View style={styles.waitingIndicator}>
@@ -796,15 +825,7 @@ export default function TripTicketDetailsScreen() {
           </View>
         )}
         
-        {tripTicket.status === 'active' && 
-         tripTicket.travelRequest?.status === 'approved' && 
-         tripTicket.procurement_status !== 'cancelled' && 
-         tripTicket.procurement_status !== 'approved' && (
-          <View style={styles.waitingIndicator}>
-            <Text style={styles.waitingText}>⏳ Awaiting Procurement Approval</Text>
-            <Text style={styles.waitingSubtext}>Trip cannot be started until procurement approves the ticket.</Text>
-          </View>
-        )}
+        {/* Awaiting procurement approval check removed - procurement no longer reviews trips */}
         
         {tripTicket.status === 'in_progress' && (
           <TouchableOpacity style={styles.completeButton} onPress={handleCompleteTrip}>
@@ -848,6 +869,209 @@ export default function TripTicketDetailsScreen() {
         autoCloseDelay={successState.autoCloseDelay}
         onClose={hideSuccess}
       />
+
+      {/* Cancellation Modal */}
+      <Modal
+        visible={showCancelModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowCancelModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="warning" size={32} color="#dc2626" />
+              <Text style={styles.modalTitle}>Cancel Trip</Text>
+            </View>
+
+            <Text style={styles.modalMessage}>
+              Please provide a reason for cancelling this trip. The director and procurement will be notified immediately.
+            </Text>
+
+            <TextInput
+              style={styles.reasonInput}
+              placeholder="Enter reason (e.g., vehicle breakdown, emergency, health issue)"
+              placeholderTextColor="#9ca3af"
+              value={cancellationReason}
+              onChangeText={setCancellationReason}
+              multiline
+              numberOfLines={4}
+              textAlignVertical="top"
+            />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => {
+                  setShowCancelModal(false);
+                  setCancellationReason('');
+                }}
+                disabled={isCancelling}
+              >
+                <Text style={styles.modalCancelButtonText}>Close</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalConfirmButton, isCancelling && styles.buttonDisabled]}
+                onPress={confirmCancelTrip}
+                disabled={isCancelling}
+              >
+                {isCancelling ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <>
+                    <Ionicons name="close-circle" size={18} color="#fff" />
+                    <Text style={styles.modalConfirmButtonText}>Cancel Trip</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Start Trip Modal */}
+      <Modal
+        visible={showStartModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowStartModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="play-circle" size={32} color="#10b981" />
+              <Text style={styles.modalTitle}>Start Trip</Text>
+            </View>
+
+            <Text style={styles.modalMessage}>
+              Please enter the current odometer reading to track fuel efficiency and distance traveled.
+            </Text>
+
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Odometer Reading (km)</Text>
+              <TextInput
+                style={styles.textInput}
+                placeholder="e.g., 12543.5"
+                placeholderTextColor="#9ca3af"
+                value={odometerStart}
+                onChangeText={setOdometerStart}
+                keyboardType="decimal-pad"
+              />
+              <Text style={styles.inputHint}>Optional: Leave blank if unavailable</Text>
+            </View>
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => {
+                  setShowStartModal(false);
+                  setOdometerStart('');
+                }}
+              >
+                <Text style={styles.modalCancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.modalConfirmButton}
+                onPress={confirmStartTrip}
+              >
+                <Ionicons name="play" size={18} color="#fff" />
+                <Text style={styles.modalConfirmButtonText}>Start Trip</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Complete Trip Modal */}
+      <Modal
+        visible={showCompleteModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowCompleteModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <ScrollView contentContainerStyle={styles.modalScrollContent}>
+            <View style={styles.modalContainer}>
+              <View style={styles.modalHeader}>
+                <Ionicons name="checkmark-circle" size={32} color="#3E0703" />
+                <Text style={styles.modalTitle}>Complete Trip</Text>
+              </View>
+
+              <Text style={styles.modalMessage}>
+                Please provide trip completion details to finalize the record.
+              </Text>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Ending Odometer Reading (km)</Text>
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="e.g., 12678.3"
+                  placeholderTextColor="#9ca3af"
+                  value={odometerEnd}
+                  onChangeText={setOdometerEnd}
+                  keyboardType="decimal-pad"
+                />
+                {tripTicket?.odometer_start && (
+                  <Text style={styles.inputHint}>
+                    Started at: {tripTicket.odometer_start} km
+                  </Text>
+                )}
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Fuel Used (liters)</Text>
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="e.g., 25.5"
+                  placeholderTextColor="#9ca3af"
+                  value={fuelUsed}
+                  onChangeText={setFuelUsed}
+                  keyboardType="decimal-pad"
+                />
+                <Text style={styles.inputHint}>Total fuel consumed during trip</Text>
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Completion Notes (Optional)</Text>
+                <TextInput
+                  style={styles.reasonInput}
+                  placeholder="Any additional notes or observations..."
+                  placeholderTextColor="#9ca3af"
+                  value={completionNotes}
+                  onChangeText={setCompletionNotes}
+                  multiline
+                  numberOfLines={3}
+                  textAlignVertical="top"
+                />
+              </View>
+
+              <View style={styles.modalButtons}>
+                <TouchableOpacity
+                  style={styles.modalCancelButton}
+                  onPress={() => {
+                    setShowCompleteModal(false);
+                    setOdometerEnd('');
+                    setFuelUsed('');
+                    setCompletionNotes('');
+                  }}
+                >
+                  <Text style={styles.modalCancelButtonText}>Cancel</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.modalConfirmButton}
+                  onPress={confirmCompleteTrip}
+                >
+                  <Ionicons name="checkmark-circle" size={18} color="#fff" />
+                  <Text style={styles.modalConfirmButtonText}>Complete Trip</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </ScrollView>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1134,7 +1358,7 @@ const styles = StyleSheet.create({
     marginTop: 16,
   },
   retryButton: {
-    backgroundColor: '#FFFFFF', // TripManager primary brand color
+    backgroundColor: '#3E0703', // TripManager primary brand color
     paddingHorizontal: 20,
     paddingVertical: 12,
     borderRadius: 8,
@@ -1397,4 +1621,142 @@ const styles = StyleSheet.create({
     color: '#065f46',
     fontWeight: '500',
   },
+  // Action buttons row
+  actionButtonsRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  // Cancel trip button
+  cancelTripButton: {
+    flex: 1,
+    backgroundColor: '#dc2626',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  cancelTripButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  // Cancellation modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalScrollContent: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContainer: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  modalHeader: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1f2937',
+    marginTop: 12,
+  },
+  modalMessage: {
+    fontSize: 15,
+    color: '#6b7280',
+    textAlign: 'center',
+    marginBottom: 20,
+    lineHeight: 22,
+  },
+  inputGroup: {
+    marginBottom: 16,
+  },
+  inputLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 8,
+  },
+  textInput: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 15,
+    color: '#1f2937',
+    backgroundColor: '#fff',
+  },
+  inputHint: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginTop: 4,
+  },
+  reasonInput: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 15,
+    color: '#1f2937',
+    minHeight: 100,
+    marginBottom: 20,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalCancelButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    backgroundColor: '#fff',
+    alignItems: 'center',
+  },
+  modalCancelButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#6b7280',
+  },
+  modalConfirmButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    backgroundColor: '#dc2626',
+  },
+  modalConfirmButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  buttonDisabled: {
+    opacity: 0.6,
+  },
 });
+

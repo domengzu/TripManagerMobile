@@ -10,7 +10,10 @@ import {
   FlatList,
   Animated,
   ActivityIndicator,
+  TextInput,
+  Modal,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { router } from 'expo-router';
 import { TripTicket } from '@/types';
 import ApiService from '@/services/api';
@@ -29,6 +32,12 @@ export default function TicketsScreen() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [filterStatus, setFilterStatus] = useState<string>('all');
   const [isLoadingDetails, setIsLoadingDetails] = useState(false);
+  
+  // Cancellation modal state
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [selectedTicketForCancel, setSelectedTicketForCancel] = useState<TripTicket | null>(null);
+  const [cancellationReason, setCancellationReason] = useState('');
+  const [isCancelling, setIsCancelling] = useState(false);
   
   // Pagination states
   const [currentPage, setCurrentPage] = useState(1);
@@ -52,6 +61,17 @@ export default function TicketsScreen() {
     setHasMoreData(true);
     loadTripTickets(false, 1, true);
   }, [filterStatus]);
+
+  // Auto-refresh when tab is focused
+  useFocusEffect(
+    useCallback(() => {
+      console.log('🔄 Tickets tab focused - refreshing data');
+      setCurrentPage(1);
+      setTripTickets([]);
+      setHasMoreData(true);
+      loadTripTickets(false, 1, true);
+    }, [filterStatus])
+  );
 
   // Check for trip tickets ready to start and send notifications
   useEffect(() => {
@@ -115,6 +135,74 @@ export default function TicketsScreen() {
   const loadTripTickets = async (isRefresh = false, page = 1, isFilterChange = false) => {
     console.log(`🔵 loadTripTickets called - page: ${page}, isRefresh: ${isRefresh}, isFilterChange: ${isFilterChange}, currentState: ${tripTickets.length} tickets`);
     
+    // Helper function to sort tickets with proper priority
+    const sortTicketsByPriority = (tickets: TripTicket[]) => {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      return tickets.sort((a: TripTicket, b: TripTicket) => {
+        // FIRST CHECK: Cancelled tickets ALWAYS go to the very bottom
+        const isCancelledA = a.status === 'cancelled';
+        const isCancelledB = b.status === 'cancelled';
+        
+        if (isCancelledA && !isCancelledB) return 1;
+        if (!isCancelledA && isCancelledB) return -1;
+        
+        // If both are cancelled, sort by date (most recent first)
+        if (isCancelledA && isCancelledB) {
+          const dateA = a.travelRequest?.approved_at ? new Date(a.travelRequest.approved_at).getTime() : 0;
+          const dateB = b.travelRequest?.approved_at ? new Date(b.travelRequest.approved_at).getTime() : 0;
+          return dateB - dateA;
+        }
+        
+        // SECOND CHECK: Completed tickets go near bottom (but above cancelled)
+        const isCompletedA = a.status === 'completed';
+        const isCompletedB = b.status === 'completed';
+        
+        if (isCompletedA && !isCompletedB) return 1;
+        if (!isCompletedA && isCompletedB) return -1;
+        
+        // If both are completed, sort by completion date (most recent first)
+        if (isCompletedA && isCompletedB) {
+          const completedA = a.completed_at ? new Date(a.completed_at).getTime() : 0;
+          const completedB = b.completed_at ? new Date(b.completed_at).getTime() : 0;
+          return completedB - completedA;
+        }
+        
+        // Now handle active tickets (not cancelled, not completed)
+        const isInProgressA = a.status === 'in_progress';
+        const isInProgressB = b.status === 'in_progress';
+        
+        // Check if trip is today
+        const dateA = a.travelRequest?.start_date ? new Date(a.travelRequest.start_date) : null;
+        const dateB = b.travelRequest?.start_date ? new Date(b.travelRequest.start_date) : null;
+        if (dateA) dateA.setHours(0, 0, 0, 0);
+        if (dateB) dateB.setHours(0, 0, 0, 0);
+        const isTodayA = dateA?.getTime() === today.getTime() && a.status === 'ready_for_trip';
+        const isTodayB = dateB?.getTime() === today.getTime() && b.status === 'ready_for_trip';
+        
+        // Priority 1: In Progress trips (highest priority)
+        if (isInProgressA && !isInProgressB) return -1;
+        if (!isInProgressA && isInProgressB) return 1;
+        
+        // Priority 2: Today's trips (ready_for_trip status with today's date)
+        if (isTodayA && !isTodayB) return -1;
+        if (!isTodayA && isTodayB) return 1;
+        
+        // Priority 3: Other ready_for_trip tickets (upcoming trips)
+        const isReadyA = a.status === 'ready_for_trip';
+        const isReadyB = b.status === 'ready_for_trip';
+        
+        if (isReadyA && !isReadyB) return -1;
+        if (!isReadyA && isReadyB) return 1;
+        
+        // For remaining tickets (active, etc.), sort by approval date (newest first)
+        const approvedA = a.travelRequest?.approved_at ? new Date(a.travelRequest.approved_at).getTime() : 0;
+        const approvedB = b.travelRequest?.approved_at ? new Date(b.travelRequest.approved_at).getTime() : 0;
+        return approvedB - approvedA;
+      });
+    };
+    
     try {
       // Prevent loading if already loading more or no more data
       if (!isRefresh && !isFilterChange && (isLoadingMore || !hasMoreData)) {
@@ -145,13 +233,6 @@ export default function TicketsScreen() {
         per_page: 15, // Load 15 items at a time (Facebook-style)
         with_relations: true
       };
-
-      // Always include procurement_status to control filtering behavior
-      if (filterStatus === 'all') {
-        filtersWithPagination.procurement_status = 'all';
-      } else {
-        filtersWithPagination.procurement_status = 'all';
-      }
 
       console.log(`🔍 Loading page ${page} with filter: "${filterStatus}"`);
 
@@ -205,12 +286,9 @@ export default function TicketsScreen() {
       
       console.log(`Setting trip tickets for filter "${filterStatus}":`, ticketsData.length, 'records');
       
-      // Sort tickets by travel date (soonest first)
-      ticketsData.sort((a: TripTicket, b: TripTicket) => {
-        const dateA = a.travelRequest?.start_date ? new Date(a.travelRequest.start_date).getTime() : Number.MAX_SAFE_INTEGER;
-        const dateB = b.travelRequest?.start_date ? new Date(b.travelRequest.start_date).getTime() : Number.MAX_SAFE_INTEGER;
-        return dateA - dateB; // Ascending order (soonest first)
-      });
+      // Sort tickets using priority function
+      sortTicketsByPriority(ticketsData);
+      console.log(`✅ Sorted ${ticketsData.length} tickets by priority`);
       
       // If "All" filter returns no data, try without any filters as fallback
       if (filterStatus === 'all' && ticketsData.length === 0) {
@@ -304,20 +382,12 @@ export default function TicketsScreen() {
                           updated[updateIndex] = detailedTicket;
                         }
                         // Re-sort after updating
-                        updated.sort((a, b) => {
-                          const dateA = a.travelRequest?.start_date ? new Date(a.travelRequest.start_date).getTime() : Number.MAX_SAFE_INTEGER;
-                          const dateB = b.travelRequest?.start_date ? new Date(b.travelRequest.start_date).getTime() : Number.MAX_SAFE_INTEGER;
-                          return dateA - dateB;
-                        });
+                        sortTicketsByPriority(updated);
                         return updated;
                       });
                     } else {
                       // Re-sort enhanced tickets
-                      enhancedTickets.sort((a, b) => {
-                        const dateA = a.travelRequest?.start_date ? new Date(a.travelRequest.start_date).getTime() : Number.MAX_SAFE_INTEGER;
-                        const dateB = b.travelRequest?.start_date ? new Date(b.travelRequest.start_date).getTime() : Number.MAX_SAFE_INTEGER;
-                        return dateA - dateB;
-                      });
+                      sortTicketsByPriority(enhancedTickets);
                       setTripTickets([...enhancedTickets]);
                     }
                   }
@@ -342,11 +412,7 @@ export default function TicketsScreen() {
           setTripTickets(prevTickets => {
             const newList = [...prevTickets, ...ticketsData];
             // Re-sort combined list
-            newList.sort((a, b) => {
-              const dateA = a.travelRequest?.start_date ? new Date(a.travelRequest.start_date).getTime() : Number.MAX_SAFE_INTEGER;
-              const dateB = b.travelRequest?.start_date ? new Date(b.travelRequest.start_date).getTime() : Number.MAX_SAFE_INTEGER;
-              return dateA - dateB;
-            });
+            sortTicketsByPriority(newList);
             console.log(`➕ Appended ${ticketsData.length} tickets. Total now: ${newList.length}`);
             return newList;
           });
@@ -426,6 +492,45 @@ export default function TicketsScreen() {
     const destination = Array.isArray(ticket.travelRequest?.destinations) 
       ? ticket.travelRequest.destinations.join(', ')
       : ticket.travelRequest?.destinations;
+
+    // Check if driver has a vehicle and if it's available
+    try {
+      const vehicleResponse = await ApiService.getDriverVehicles();
+      const vehiclesData = Array.isArray(vehicleResponse) ? vehicleResponse : (vehicleResponse.vehicles || []);
+      
+      if (vehiclesData.length === 0) {
+        showConfirmation({
+          title: 'No Vehicle',
+          message: 'You need to add a vehicle before starting a trip. Please go to the Vehicles tab and add your vehicle first.',
+          type: 'danger',
+          confirmText: 'OK',
+          onConfirm: () => hideConfirmation()
+        });
+        return;
+      }
+
+      const driverVehicle = vehiclesData[0];
+      if (driverVehicle.status === 'Maintenance' || driverVehicle.status === 'Out of Service') {
+        showConfirmation({
+          title: 'Vehicle Not Available',
+          message: `Your vehicle is currently marked as "${driverVehicle.status}". Please update your vehicle status to "Available" before starting a trip.`,
+          type: 'warning',
+          confirmText: 'OK',
+          onConfirm: () => hideConfirmation()
+        });
+        return;
+      }
+    } catch (error) {
+      console.error('Failed to check vehicle status:', error);
+      showConfirmation({
+        title: 'Error',
+        message: 'Failed to verify vehicle status. Please try again.',
+        type: 'danger',
+        confirmText: 'OK',
+        onConfirm: () => hideConfirmation()
+      });
+      return;
+    }
 
     // Check if travel date exists
     if (!ticket.travelRequest?.start_date) {
@@ -562,12 +667,46 @@ export default function TicketsScreen() {
     });
   };
 
-  const getStatusColor = (status: string, procurementStatus?: string) => {
-    // If procurement is cancelled, show cancelled status
-    if (procurementStatus === 'cancelled' || procurementStatus === 'canceled') {
-      return '#dc2626';
+  const handleCancelTrip = (ticket: TripTicket) => {
+    setSelectedTicketForCancel(ticket);
+    setCancellationReason('');
+    setShowCancelModal(true);
+  };
+
+  const confirmCancelTrip = async () => {
+    if (!selectedTicketForCancel) return;
+
+    if (!cancellationReason.trim()) {
+      Alert.alert('Error', 'Please provide a reason for cancellation');
+      return;
     }
-    
+
+    setIsCancelling(true);
+    try {
+      await ApiService.cancelTripEmergency(selectedTicketForCancel.id, cancellationReason.trim());
+      
+      showSuccess({
+        title: 'Trip Cancelled',
+        message: 'Trip has been cancelled successfully. Director has been notified.',
+        autoClose: true,
+        autoCloseDelay: 3000
+      });
+
+      setShowCancelModal(false);
+      setCancellationReason('');
+      setSelectedTicketForCancel(null);
+      loadTripTickets();
+    } catch (error: any) {
+      Alert.alert(
+        'Error',
+        error.response?.data?.message || 'Failed to cancel trip. Please try again.'
+      );
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
+  const getStatusColor = (status: string) => {
     switch (status) {
       case 'active':
         return '#65676B';
@@ -585,12 +724,7 @@ export default function TicketsScreen() {
     }
   };
 
-  const getStatusText = (status: string, procurementStatus?: string) => {
-    // If procurement is cancelled, show cancelled status
-    if (procurementStatus === 'cancelled' || procurementStatus === 'canceled') {
-      return 'Cancelled';
-    }
-    
+  const getStatusText = (status: string) => {
     switch (status) {
       case 'active':
         return 'Awaiting Approval';
@@ -619,18 +753,7 @@ export default function TicketsScreen() {
     });
   };
 
-  const getProcurementStatusColor = (status: string) => {
-    switch (status) {
-      case 'approved':
-        return '#10b981';
-      case 'pending':
-        return '#C28F22';
-      case 'cancelled':
-        return '#dc2626';
-      default:
-        return '#65676B';
-    }
-  };
+  // Procurement status function removed - procurement no longer reviews trips
 
   const getFilterLabel = (status: string) => {
     const label = (() => {
@@ -673,22 +796,10 @@ export default function TicketsScreen() {
           <Text style={styles.ticketNumber} numberOfLines={1}>
             {ticket.ticket_number || `TT-${ticket.id}`}
           </Text>
-          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(ticket.status, ticket.procurement_status) }]}>
-            <Text style={styles.statusText} numberOfLines={1}>{getStatusText(ticket.status, ticket.procurement_status)}</Text>
+          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(ticket.status) }]}>
+            <Text style={styles.statusText} numberOfLines={1}>{getStatusText(ticket.status)}</Text>
           </View>
         </View>
-        
-        {/* Procurement Status */}
-        {ticket.procurement_status && (
-          <View style={styles.procurementRow}>
-            <View style={[styles.procurementDot, { backgroundColor: getProcurementStatusColor(ticket.procurement_status) }]} />
-            <Text style={[styles.procurementLabel, { color: getProcurementStatusColor(ticket.procurement_status) }]} numberOfLines={1}>
-              {ticket.procurement_status === 'approved' ? 'Procurement Approved' : 
-               ticket.procurement_status === 'pending' ? 'Awaiting Procurement' : 
-               'Procurement Cancelled'}
-            </Text>
-          </View>
-        )}
       </View>
 
       {/* Trip Ready Today Banner */}
@@ -839,16 +950,29 @@ export default function TicketsScreen() {
       {(ticket.status === 'ready_for_trip' || ticket.status === 'in_progress') && (
         <View style={styles.actionButtons}>
           {ticket.status === 'ready_for_trip' && (
-            <TouchableOpacity
-              style={styles.startButton}
-              onPress={(e) => {
-                e.stopPropagation();
-                handleStartTrip(ticket);
-              }}
-            >
-              <Ionicons name="play-circle" size={18} color="#fff" />
-              <Text style={styles.startButtonText}>Start Trip</Text>
-            </TouchableOpacity>
+            <>
+              <TouchableOpacity
+                style={styles.startButton}
+                onPress={(e) => {
+                  e.stopPropagation();
+                  handleStartTrip(ticket);
+                }}
+              >
+                <Ionicons name="play-circle" size={18} color="#fff" />
+                <Text style={styles.startButtonText}>Start Trip</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity
+                style={styles.cancelButton}
+                onPress={(e) => {
+                  e.stopPropagation();
+                  handleCancelTrip(ticket);
+                }}
+              >
+                <Ionicons name="close-circle" size={18} color="#fff" />
+                <Text style={styles.cancelButtonText}>Report Issue</Text>
+              </TouchableOpacity>
+            </>
           )}
           
           {ticket.status === 'in_progress' && (
@@ -1033,6 +1157,66 @@ export default function TicketsScreen() {
         autoCloseDelay={successState.autoCloseDelay}
         onClose={hideSuccess}
       />
+
+      {/* Cancellation Modal */}
+      <Modal
+        visible={showCancelModal}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setShowCancelModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="warning" size={32} color="#dc2626" />
+              <Text style={styles.modalTitle}>Cancel Trip</Text>
+            </View>
+
+            <Text style={styles.modalMessage}>
+              Please provide a reason for cancelling this trip. The director will be notified.
+            </Text>
+
+            <TextInput
+              style={styles.reasonInput}
+              placeholder="Enter reason (e.g., vehicle breakdown, emergency)"
+              placeholderTextColor="#9ca3af"
+              value={cancellationReason}
+              onChangeText={setCancellationReason}
+              multiline
+              numberOfLines={4}
+              textAlignVertical="top"
+            />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => {
+                  setShowCancelModal(false);
+                  setCancellationReason('');
+                }}
+                disabled={isCancelling}
+              >
+                <Text style={styles.modalCancelButtonText}>Close</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalConfirmButton, isCancelling && styles.buttonDisabled]}
+                onPress={confirmCancelTrip}
+                disabled={isCancelling}
+              >
+                {isCancelling ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <>
+                    <Ionicons name="close-circle" size={18} color="#fff" />
+                    <Text style={styles.modalConfirmButtonText}>Cancel Trip</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1487,4 +1671,108 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
   },
+  // Cancel button styles
+  cancelButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: '#dc2626',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  cancelButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  // Cancellation modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContainer: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 24,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  modalHeader: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1f2937',
+    marginTop: 12,
+  },
+  modalMessage: {
+    fontSize: 15,
+    color: '#6b7280',
+    textAlign: 'center',
+    marginBottom: 20,
+    lineHeight: 22,
+  },
+  reasonInput: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    padding: 12,
+    fontSize: 15,
+    color: '#1f2937',
+    minHeight: 100,
+    marginBottom: 20,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalCancelButton: {
+    flex: 1,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    backgroundColor: '#fff',
+    alignItems: 'center',
+  },
+  modalCancelButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#6b7280',
+  },
+  modalConfirmButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    backgroundColor: '#dc2626',
+  },
+  modalConfirmButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#fff',
+  },
+  buttonDisabled: {
+    opacity: 0.6,
+  },
 });
+

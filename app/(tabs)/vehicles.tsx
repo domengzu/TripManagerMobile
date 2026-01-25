@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -14,6 +14,8 @@ import {
   KeyboardAvoidingView,
   ActivityIndicator,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { router } from 'expo-router';
 import { Picker } from '@react-native-picker/picker';
 import { useAuth } from '@/contexts/AuthContext';
 import Icon from 'react-native-vector-icons/Ionicons';
@@ -45,17 +47,33 @@ interface Vehicle {
   fuel_type?: string;
   color?: string;
   status: 'Available' | 'In Use' | 'Maintenance' | 'Out of Service';
+  status_notes?: string;
+  fuel_tank_capacity?: number;
+  current_fuel_level?: number;
+  last_refuel_date?: string;
+  last_refuel_location?: string;
+  license_restriction?: string;
+  active_trip?: {
+    id: number;
+    status: string;
+    driver_name: string;
+    driver_id: number;
+    destination: string;
+    departure_time: string;
+  } | null;
   created_at: string;
   updated_at: string;
 }
 
 interface FuelRecord {
-  id: number;
+  id: string | number; // Can be "refuel-1" or "fuel-1" from API
   vehicle_id: number;
   driver_id: number;
   date: string;
   amount: number;
   fuel_type: string;
+  type?: 'add' | 'usage'; // Type of fuel record
+  purpose?: string | null; // Purpose/reason for the record
   created_at: string;
   updated_at: string;
   vehicle?: Vehicle;
@@ -63,14 +81,45 @@ interface FuelRecord {
 
 export default function VehiclesScreen() {
   const { user } = useAuth();
-  const [vehicle, setVehicle] = useState<Vehicle | null>(null);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [selectedVehicle, setSelectedVehicle] = useState<Vehicle | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [showEditModal, setShowEditModal] = useState(false);
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showFuelModal, setShowFuelModal] = useState(false);
+  const [fuelActionType, setFuelActionType] = useState<'add' | 'usage'>('add'); // Track if adding fuel or recording usage
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [selectedStatus, setSelectedStatus] = useState<Vehicle['status'] | null>(null);
+  const [statusNotes, setStatusNotes] = useState('');
+
+  // Check if driver can manage fuel for this vehicle based on license restrictions
+  const canManageFuel = (vehicle: Vehicle): boolean => {
+    // Debug logging
+    console.log('🔍 Checking fuel management access:', {
+      vehicleId: vehicle.id,
+      vehiclePlate: vehicle.plate_number,
+      vehicleRestriction: vehicle.license_restriction,
+      driverLicenseType: user?.license_type,
+      driverName: user?.name
+    });
+
+    // If no license restriction or 'Any', anyone can manage
+    if (!vehicle.license_restriction || vehicle.license_restriction === 'Any') {
+      console.log('✅ Vehicle has no restriction or Any - access granted');
+      return true;
+    }
+    
+    // If driver has no license type, they can't manage restricted vehicles
+    if (!user?.license_type) {
+      console.log('❌ Driver has no license_type - access denied');
+      return false;
+    }
+    
+    // Check if driver's license matches vehicle restriction
+    const hasAccess = user.license_type === vehicle.license_restriction;
+    console.log(hasAccess ? '✅ License match - access granted' : '❌ License mismatch - access denied');
+    return hasAccess;
+  };
   const {
     confirmationState,
     successState,
@@ -80,19 +129,7 @@ export default function VehiclesScreen() {
     hideSuccess
   } = useModals();
 
-  // Form states
-  const [formData, setFormData] = useState({
-    plate_number: '',
-    type: '',
-    model: '',
-    year: '',
-    capacity: '',
-    fuel_type: 'Gasoline', // Default required fuel type
-    color: '',
-    status: 'Available' as Vehicle['status'],
-  });
-
-  const [errors, setErrors] = useState<Record<string, string>>({});
+  // Removed form states - drivers cannot add/edit vehicles
 
   // Fuel records state
   const [fuelRecords, setFuelRecords] = useState<FuelRecord[]>([]);
@@ -110,14 +147,24 @@ export default function VehiclesScreen() {
       date: todayString,
       amount: '',
       fuel_type: 'Gasoline',
+      purpose: '', // For usage tracking
+      odometer: '', // Optional odometer reading
     };
   });
 
   useEffect(() => {
-    loadVehicle();
+    loadVehicles();
   }, []);
 
-  const loadVehicle = async (isRefresh = false) => {
+  // Auto-refresh when tab is focused
+  useFocusEffect(
+    useCallback(() => {
+      console.log('🔄 Vehicles tab focused - refreshing data');
+      loadVehicles(true);
+    }, [])
+  );
+
+  const loadVehicles = async (isRefresh = false) => {
     try {
       if (isRefresh) {
         setIsRefreshing(true);
@@ -125,30 +172,76 @@ export default function VehiclesScreen() {
         setIsLoading(true);
       }
 
+      console.log('🚗 Loading vehicles...');
       const response = await ApiService.getDriverVehicles();
-      // Handle response - driver should only have one vehicle
-      const vehiclesData = Array.isArray(response) ? response : (response.vehicles || []);
+      console.log('📦 Raw API response:', response);
       
-      if (vehiclesData.length > 0) {
-        setVehicle(vehiclesData[0]); // Take the first (and likely only) vehicle
+      // Handle response - drivers can view all vehicles
+      const vehiclesData = Array.isArray(response) ? response : (response.vehicles || []);
+      console.log('🚙 Processed vehicles data:', vehiclesData);
+      console.log('📊 Number of vehicles:', vehiclesData.length);
+      
+      // Sort vehicles: your active trips at top, then matching license, then others
+      const sortedVehicles = vehiclesData.sort((a: Vehicle, b: Vehicle) => {
+        const aHasMyTrip = a.active_trip?.driver_id === user?.id;
+        const bHasMyTrip = b.active_trip?.driver_id === user?.id;
+        const aCanManage = !a.license_restriction || a.license_restriction === 'Any' || a.license_restriction === user?.license_type;
+        const bCanManage = !b.license_restriction || b.license_restriction === 'Any' || b.license_restriction === user?.license_type;
         
-        // Load fuel records for the vehicle
+        // Priority 1: Your active trips first
+        if (aHasMyTrip && !bHasMyTrip) return -1;
+        if (!aHasMyTrip && bHasMyTrip) return 1;
+        
+        // Priority 2: If both have your trips or neither, sort by license match
+        if (aCanManage && !bCanManage) return -1;
+        if (!aCanManage && bCanManage) return 1;
+        
+        // Priority 3: If same license access, sort by plate number
+        return a.plate_number.localeCompare(b.plate_number);
+      });
+      
+      console.log('✅ Sorted vehicles (your trips → matching license → others)');
+      
+      // Debug: Check fuel data for each vehicle
+      sortedVehicles.forEach((v: any) => {
+        console.log(`🔍 Vehicle ${v.plate_number}:`, {
+          id: v.id,
+          fuel_tank_capacity: v.fuel_tank_capacity,
+          current_fuel_level: v.current_fuel_level,
+          last_refuel_date: v.last_refuel_date
+        });
+      });
+      
+      setVehicles(sortedVehicles);
+      
+      // Load fuel records if there are vehicles
+      if (vehiclesData.length > 0) {
         try {
           const fuelRecordsResponse = await ApiService.getFuelRecords();
+          console.log('🔥 Fuel records API response:', fuelRecordsResponse);
+          console.log('🔥 Number of fuel records:', fuelRecordsResponse?.length || 0);
+          
+          // Debug: Log each record's type
+          if (Array.isArray(fuelRecordsResponse)) {
+            fuelRecordsResponse.forEach((r: any, idx: number) => {
+              console.log(`  Record ${idx + 1}: ID=${r.id}, Type=${r.type}, Amount=${r.amount}, Date=${r.date}`);
+            });
+          }
+          
           setFuelRecords(fuelRecordsResponse);
         } catch (fuelError) {
           console.error('Failed to load fuel records:', fuelError);
-          // Don't show error for fuel records, just log it
         }
       } else {
-        setVehicle(null);
         setFuelRecords([]);
+        console.log('⚠️ No vehicles found in the system');
       }
     } catch (error: any) {
-      console.error('Failed to load vehicle:', error);
+      console.error('❌ Failed to load vehicles:', error);
+      console.error('Error details:', error.response?.data);
       showConfirmation({
         title: 'Error',
-        message: 'Failed to load vehicle data. Please try again.',
+        message: error.response?.data?.message || 'Failed to load vehicles data. Please try again.',
         type: 'danger',
         confirmText: 'OK',
         onConfirm: () => hideConfirmation()
@@ -160,50 +253,20 @@ export default function VehiclesScreen() {
   };
 
   const handleRefresh = () => {
-    loadVehicle(true);
+    loadVehicles(true);
   };
 
-  const resetForm = () => {
-    setFormData({
-      plate_number: '',
-      type: '',
-      model: '',
-      year: '',
-      capacity: '',
-      fuel_type: 'Gasoline', // Default required fuel type
-      color: '',
-      status: 'Available',
-    });
-    setErrors({});
-  };
+  // Removed add/edit modal functions - drivers cannot add/edit vehicles
 
-  const openAddModal = () => {
-    resetForm();
-    setShowAddModal(true);
-  };
-
-  const openEditModal = () => {
-    if (vehicle) {
-      setFormData({
-        plate_number: vehicle.plate_number,
-        type: vehicle.type,
-        model: vehicle.model,
-        year: vehicle.year.toString(),
-        capacity: vehicle.capacity.toString(),
-        fuel_type: vehicle.fuel_type || '',
-        color: vehicle.color || '',
-        status: vehicle.status,
-      });
-      setErrors({});
-      setShowEditModal(true);
-    }
-  };
-
-  const openStatusModal = () => {
+  const openStatusModal = (vehicle: Vehicle) => {
+    setSelectedVehicle(vehicle);
+    setSelectedStatus(null);
+    setStatusNotes('');
     setShowStatusModal(true);
   };
 
-  const openFuelModal = () => {
+  const openFuelModal = (vehicle: Vehicle) => {
+    setSelectedVehicle(vehicle);
     // Always set today's date and reset form when opening the modal
     const today = new Date();
     // Ensure we get the correct date by using local date components
@@ -216,141 +279,75 @@ export default function VehiclesScreen() {
       date: todayString,
       amount: '',
       fuel_type: 'Gasoline',
+      purpose: '',
+      odometer: '',
     });
+    setFuelActionType('add'); // Default to add fuel
     setShowFuelModal(true);
   };
 
-  const handleAddVehicle = async () => {
-    try {
-      setIsSubmitting(true);
-      setErrors({});
+  const openUsageModal = (vehicle: Vehicle) => {
+    setSelectedVehicle(vehicle);
+    // Set today's date for usage tracking
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    const todayString = `${year}-${month}-${day}`;
 
-      const vehicleData = {
-        plate_number: formData.plate_number.trim(),
-        type: formData.type.trim(),
-        model: formData.model.trim(),
-        year: parseInt(formData.year),
-        capacity: parseInt(formData.capacity),
-        fuel_type: formData.fuel_type.trim() || '',
-        color: formData.color.trim() || '',
-        status: formData.status,
-      };
+    setFuelFormData({
+      date: todayString,
+      amount: '',
+      fuel_type: 'Gasoline',
+      purpose: '',
+      odometer: '',
+    });
+    setFuelActionType('usage'); // Set to usage tracking
+    setShowFuelModal(true);
+  };
 
-      // Log the data being sent for debugging
-      console.log('Creating vehicle with data:', vehicleData);
+  // Removed handleAddVehicle and handleUpdateVehicle - drivers cannot add/edit vehicles
 
-      await ApiService.createDriverVehicle(vehicleData);
-      
-      showSuccess({
-        title: 'Vehicle Added',
-        message: 'Your vehicle has been added successfully!',
-        autoClose: true,
-        autoCloseDelay: 3000
-      });
-      setShowAddModal(false);
-      loadVehicle();
-      resetForm();
-    } catch (error: any) {
-      console.error('Failed to add vehicle:', error);
-      console.error('Full add error:', error.response?.data);
-      
-      if (error.response?.data?.errors) {
-        setErrors(error.response.data.errors);
-      } else {
-        const errorMessage = error.response?.data?.message || 
-                            (error.response?.data?.errors ? 
-                             Object.values(error.response.data.errors).flat().join(', ') : 
-                             'Failed to add vehicle');
-        showConfirmation({
-          title: 'Error',
-          message: errorMessage,
-          type: 'danger',
-          confirmText: 'OK',
-          onConfirm: () => hideConfirmation()
-        });
-      }
-    } finally {
-      setIsSubmitting(false);
+  const handleStatusSelection = (status: Vehicle['status']) => {
+    if (status === 'Maintenance' || status === 'Out of Service') {
+      setSelectedStatus(status);
+      setStatusNotes('');
+    } else {
+      handleUpdateStatus(status, '');
     }
   };
 
-  const handleUpdateVehicle = async () => {
-    if (!vehicle) return;
-
-    try {
-      setIsSubmitting(true);
-      setErrors({});
-
-      const vehicleData = {
-        plate_number: formData.plate_number.trim(),
-        type: formData.type.trim(),
-        model: formData.model.trim(),
-        year: parseInt(formData.year),
-        capacity: parseInt(formData.capacity),
-        fuel_type: formData.fuel_type.trim() || '',
-        color: formData.color.trim() || '',
-        status: formData.status,
-      };
-
-      // Log the data being sent for debugging
-      console.log('Updating vehicle with data:', vehicleData);
-
-      await ApiService.updateDriverVehicle(vehicle.id, vehicleData);
-      
-      showSuccess({
-        title: 'Vehicle Updated',
-        message: 'Your vehicle has been updated successfully!',
-        autoClose: true,
-        autoCloseDelay: 3000
-      });
-      setShowEditModal(false);
-      loadVehicle();
-    } catch (error: any) {
-      console.error('Failed to update vehicle:', error);
-      console.error('Full update error:', error.response?.data);
-      
-      if (error.response?.data?.errors) {
-        setErrors(error.response.data.errors);
-      } else {
-        const errorMessage = error.response?.data?.message || 
-                            (error.response?.data?.errors ? 
-                             Object.values(error.response.data.errors).flat().join(', ') : 
-                             'Failed to update vehicle');
-        showConfirmation({
-          title: 'Error',
-          message: errorMessage,
-          type: 'danger',
-          confirmText: 'OK',
-          onConfirm: () => hideConfirmation()
-        });
-      }
-    } finally {
-      setIsSubmitting(false);
+  const confirmStatusWithNotes = () => {
+    if (selectedStatus) {
+      handleUpdateStatus(selectedStatus, statusNotes);
+      setSelectedStatus(null);
+      setStatusNotes('');
     }
   };
 
-  const handleUpdateStatus = async (newStatus: Vehicle['status']) => {
-    if (!vehicle) return;
+  const handleUpdateStatus = async (newStatus: Vehicle['status'], notes: string = '') => {
+    if (!selectedVehicle) return;
 
     try {
       setIsSubmitting(true);
 
-      // Use correct database field names with the web route
+      // Include all required vehicle fields along with status update
       const updateData = {
-        plate_number: vehicle.plate_number,
-        type: vehicle.type,
-        model: vehicle.model,
-        year: vehicle.year,
-        capacity: vehicle.capacity,
-        fuel_type: vehicle.fuel_type || '',
-        color: vehicle.color || '',
+        plate_number: selectedVehicle.plate_number,
+        type: selectedVehicle.type,
+        model: selectedVehicle.model,
+        year: selectedVehicle.year,
+        capacity: selectedVehicle.capacity,
+        fuel_type: selectedVehicle.fuel_type,
+        color: selectedVehicle.color,
         status: newStatus,
+        status_notes: notes || null,
       };
       
       console.log('Updating vehicle status to:', newStatus);
       console.log('Sending data:', updateData);
       
-      await ApiService.updateDriverVehicle(vehicle.id, updateData);
+      await ApiService.updateDriverVehicle(selectedVehicle.id, updateData);
       
       showSuccess({
         title: 'Status Updated',
@@ -359,7 +356,8 @@ export default function VehiclesScreen() {
         autoCloseDelay: 3000
       });
       setShowStatusModal(false);
-      loadVehicle();
+      setSelectedVehicle(null);
+      loadVehicles();
     } catch (error: any) {
       console.error('Failed to update status:', error);
       
@@ -383,16 +381,32 @@ export default function VehiclesScreen() {
   };
 
   const handleFuelSubmit = async () => {
-    if (!vehicle) return;
+    if (!selectedVehicle) return;
 
     try {
       setIsSubmitting(true);
+
+      console.log('=== FUEL SUBMIT DEBUG ===');
+      console.log('fuelActionType:', fuelActionType);
+      console.log('fuelFormData:', fuelFormData);
 
       // Validate form
       if (!fuelFormData.date || !fuelFormData.amount || !fuelFormData.fuel_type) {
         showConfirmation({
           title: 'Validation Error',
           message: 'Please fill in all required fields.',
+          type: 'danger',
+          confirmText: 'OK',
+          onConfirm: () => hideConfirmation()
+        });
+        return;
+      }
+
+      // For usage tracking, purpose is required
+      if (fuelActionType === 'usage' && !fuelFormData.purpose?.trim()) {
+        showConfirmation({
+          title: 'Validation Error',
+          message: 'Please enter the purpose/reason for fuel usage.',
           type: 'danger',
           confirmText: 'OK',
           onConfirm: () => hideConfirmation()
@@ -413,30 +427,42 @@ export default function VehiclesScreen() {
       }
 
       const fuelData = {
-        vehicle_id: vehicle.id,
+        vehicle_id: selectedVehicle.id,
         date: fuelFormData.date,
-        amount: amount,
+        amount: amount, // Send positive amount, backend will handle negation for usage
         fuel_type: fuelFormData.fuel_type,
+        purpose: fuelFormData.purpose || null,
+        odometer: fuelFormData.odometer ? parseFloat(fuelFormData.odometer) : null,
+        type: fuelActionType, // 'add' or 'usage'
       };
+
+      console.log('=== FUEL DATA TO SEND ===');
+      console.log('fuelData:', fuelData);
+      console.log('type field:', fuelData.type);
 
       await ApiService.createFuelRecord(fuelData);
 
       showSuccess({
-        title: 'Fuel Record Added',
-        message: 'Fuel record has been added successfully!',
+        title: fuelActionType === 'usage' ? 'Fuel Usage Recorded' : 'Fuel Record Added',
+        message: fuelActionType === 'usage' 
+          ? 'Fuel usage has been recorded successfully!' 
+          : 'Fuel record has been added successfully!',
         autoClose: true,
         autoCloseDelay: 3000
       });
 
       setShowFuelModal(false);
+      setSelectedVehicle(null);
       // Reset form
       setFuelFormData({
         date: new Date().toISOString().split('T')[0],
         amount: '',
         fuel_type: 'Gasoline',
+        purpose: '',
+        odometer: '',
       });
       // Reload fuel records
-      loadVehicle();
+      loadVehicles();
     } catch (error: any) {
       console.error('Failed to add fuel record:', error);
       const errorMessage = error.response?.data?.message ||
@@ -530,7 +556,7 @@ export default function VehiclesScreen() {
   if (isLoading) {
     return (
       <LoadingComponent 
-        message="Loading your vehicle..." 
+        message="Loading vehicles..." 
         color="#3E0703"
       />
     );
@@ -543,18 +569,17 @@ export default function VehiclesScreen() {
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerContent}>
-          <View style={styles.headerTitleContainer}>
+          <View style={styles.titleContainer}>
             <Icon name="car-sport" size={24} color="#3E0703" />
-            <Text style={styles.headerTitle}>Vehicle Information</Text>
+            <Text style={styles.title}>Vehicles</Text>
+            {vehicles.length > 0 && (
+              <View style={styles.vehicleCountBadge}>
+                <Text style={styles.vehicleCountText}>{vehicles.length}</Text>
+              </View>
+            )}
           </View>
           <NotificationBellButton color="#3E0703" size={26} />
         </View>
-        {!vehicle && (
-          <TouchableOpacity style={styles.addButton} onPress={openAddModal}>
-            <Icon name="add" size={20} color="#fff" />
-            <Text style={styles.addButtonText}>Add Vehicle</Text>
-          </TouchableOpacity>
-        )}
       </View>
 
       <ScrollView
@@ -569,115 +594,202 @@ export default function VehiclesScreen() {
           />
         }
       >
-        {vehicle ? (
+        {vehicles.length > 0 ? (
           <>
-            {/* Vehicle Status Card */}
-            <View style={styles.vehicleCard}>
-              <View style={styles.vehicleHeader}>
-                <View style={styles.vehicleHeaderContent}>
-                  <Icon name={getVehicleTypeIcon(vehicle.type)} size={24} color="#C28F22" />
-                  <View style={styles.vehicleHeaderText}>
-                    <Text style={styles.vehicleTitle}>Vehicle Status</Text>
-                    <Text style={styles.vehicleSubtitle}>Current vehicle information</Text>
-                  </View>
+            {/* Fleet Statistics */}
+            <View style={styles.statsCard}>
+              <View style={styles.statsGrid}>
+                <View style={styles.statItem}>
+                  <Icon name="car-sport" size={16} color="#3E0703" />
+                  <Text style={styles.statValue}>{vehicles.length}</Text>
+                  <Text style={styles.statLabel}>Total</Text>
+                </View>
+                <View style={styles.statItem}>
+                  <Icon name="checkmark-circle" size={16} color="#10b981" />
+                  <Text style={styles.statValue}>
+                    {vehicles.filter(v => v.status === 'Available').length}
+                  </Text>
+                  <Text style={styles.statLabel}>Available</Text>
+                </View>
+                <View style={styles.statItem}>
+                  <Icon name="construct" size={16} color="#f59e0b" />
+                  <Text style={styles.statValue}>
+                    {vehicles.filter(v => v.status === 'Maintenance').length}
+                  </Text>
+                  <Text style={styles.statLabel}>Maintenance</Text>
                 </View>
               </View>
-              
-              <View style={styles.vehicleContent}>
-                <View style={styles.vehicleMainInfo}>
-                  <View style={[styles.statusIcon, { backgroundColor: getStatusColor(vehicle.status) + '20' }]}>
-                    <Icon
-                      name={getStatusIcon(vehicle.status)}
-                      size={32}
-                      color={getStatusColor(vehicle.status)}
-                    />
-                  </View>
-                  <View style={styles.vehicleMainDetails}>
-                    <Text style={styles.plateNumber}>{vehicle.plate_number}</Text>
-                    <Text style={styles.vehicleModel}>{vehicle.type} • {vehicle.model}</Text>
+            </View>
+
+            {/* Vehicles List */}
+            {vehicles.map((vehicle) => (
+              <View key={vehicle.id} style={styles.vehicleCard}>
+                <View style={styles.vehicleHeader}>
+                  <View style={styles.vehicleHeaderContent}>
+                    <Icon name={getVehicleTypeIcon(vehicle.type)} size={24} color="#C28F22" />
+                    <View style={styles.vehicleHeaderText}>
+                      <Text style={styles.vehicleTitle}>{vehicle.plate_number}</Text>
+                      <Text style={styles.vehicleSubtitle}>{vehicle.model} • {vehicle.year}</Text>
+                    </View>
                     <View style={[styles.statusBadge, { backgroundColor: getStatusColor(vehicle.status) }]}>
                       <Text style={styles.statusText}>{vehicle.status}</Text>
                     </View>
                   </View>
                 </View>
                 
-                <View style={styles.vehicleActions}>
-                  <TouchableOpacity style={styles.editButton} onPress={openEditModal}>
-                    <Icon name="create" size={16} color="#3E0703" />
-                    <Text style={styles.editButtonText}>Details</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.statusButton} onPress={openStatusModal}>
-                    <Icon name="refresh" size={16} color="#10b981" />
-                    <Text style={styles.statusButtonText}>Status</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity style={styles.fuelButton} onPress={openFuelModal}>
-                    <Icon name="water" size={16} color="#f59e0b" />
-                    <Text style={styles.fuelButtonText}>Fuel</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            </View>
+                <View style={styles.vehicleContent}>
+                  <View style={styles.vehicleDetailsGrid}>
+                    <View style={styles.vehicleDetailItem}>
+                      <Text style={styles.detailLabel}>Type</Text>
+                      <Text style={styles.detailValue}>{vehicle.type}</Text>
+                    </View>
+                    <View style={styles.vehicleDetailItem}>
+                      <Text style={styles.detailLabel}>Capacity</Text>
+                      <Text style={styles.detailValue}>{vehicle.capacity}</Text>
+                    </View>
+                    <View style={styles.vehicleDetailItem}>
+                      <Text style={styles.detailLabel}>Fuel</Text>
+                      <Text style={styles.detailValue}>{vehicle.fuel_type || 'N/A'}</Text>
+                    </View>
+                    {vehicle.color && (
+                      <View style={styles.vehicleDetailItem}>
+                        <Text style={styles.detailLabel}>Color</Text>
+                        <Text style={styles.detailValue}>{vehicle.color}</Text>
+                      </View>
+                    )}
+                  </View>
 
-            {/* Vehicle Details Card */}
-            <View style={styles.detailsCard}>
-              <View style={styles.detailsHeader}>
-                <View style={styles.detailsHeaderContent}>
-                  <Icon name="information-circle" size={24} color="#C28F22" />
-                  <View style={styles.detailsHeaderText}>
-                    <Text style={styles.detailsTitle}>Vehicle Details</Text>
-                    <Text style={styles.detailsSubtitle}>Complete vehicle information</Text>
+                  {/* Fuel Level Indicator */}
+                  <View style={styles.fuelIndicatorContainer}>
+                    <View style={styles.fuelIndicatorHeader}>
+                      <View style={styles.fuelIndicatorLabelRow}>
+                        <Icon name="water" size={14} color="#3b82f6" />
+                        <Text style={styles.fuelIndicatorLabel}>Fuel Level</Text>
+                      </View>
+                      {vehicle.fuel_tank_capacity && vehicle.current_fuel_level !== null && vehicle.current_fuel_level !== undefined ? (
+                        <Text style={styles.fuelIndicatorValue}>
+                          {parseFloat(vehicle.current_fuel_level.toString()).toFixed(1)}L / {parseFloat(vehicle.fuel_tank_capacity.toString()).toFixed(0)}L
+                        </Text>
+                      ) : (
+                        <Text style={styles.fuelIndicatorValueEmpty}>No fuel data</Text>
+                      )}
+                    </View>
+                    {vehicle.fuel_tank_capacity && vehicle.current_fuel_level !== null && vehicle.current_fuel_level !== undefined ? (
+                      <>
+                        <View style={styles.fuelProgressBar}>
+                          <View 
+                            style={[
+                              styles.fuelProgressFill, 
+                              { 
+                                width: `${Math.min(100, (parseFloat(vehicle.current_fuel_level.toString()) / parseFloat(vehicle.fuel_tank_capacity.toString())) * 100)}%`,
+                                backgroundColor: 
+                                  (parseFloat(vehicle.current_fuel_level.toString()) / parseFloat(vehicle.fuel_tank_capacity.toString())) > 0.5 
+                                    ? '#10b981' 
+                                    : (parseFloat(vehicle.current_fuel_level.toString()) / parseFloat(vehicle.fuel_tank_capacity.toString())) > 0.25 
+                                      ? '#f59e0b' 
+                                      : '#ef4444'
+                              }
+                            ]} 
+                          />
+                        </View>
+                        <Text style={styles.fuelPercentageText}>
+                          {((parseFloat(vehicle.current_fuel_level.toString()) / parseFloat(vehicle.fuel_tank_capacity.toString())) * 100).toFixed(0)}% remaining
+                        </Text>
+                      </>
+                    ) : (
+                      <Text style={styles.fuelEmptyMessage}>
+                        Add fuel records to track fuel level
+                      </Text>
+                    )}
                   </View>
-                </View>
-              </View>
-              
-              <View style={styles.detailsContent}>
-                <View style={styles.detailsGrid}>
-                  <View style={styles.detailItem}>
-                    <Text style={styles.detailLabel}>Plate Number</Text>
-                    <Text style={styles.detailValue}>{vehicle.plate_number}</Text>
-                  </View>
-                  
-                  <View style={styles.detailItem}>
-                    <Text style={styles.detailLabel}>Type</Text>
-                    <Text style={styles.detailValue}>{vehicle.type}</Text>
-                  </View>
-                  
-                  <View style={styles.detailItem}>
-                    <Text style={styles.detailLabel}>Model</Text>
-                    <Text style={styles.detailValue}>{vehicle.model}</Text>
-                  </View>
-                  
-                  <View style={styles.detailItem}>
-                    <Text style={styles.detailLabel}>Year</Text>
-                    <Text style={styles.detailValue}>{vehicle.year}</Text>
-                  </View>
-                  
-                  <View style={styles.detailItem}>
-                    <Text style={styles.detailLabel}>Capacity</Text>
-                    <Text style={styles.detailValue}>{vehicle.capacity} persons</Text>
-                  </View>
-                  
-                  {vehicle.fuel_type && (
-                    <View style={styles.detailItem}>
-                      <Text style={styles.detailLabel}>Fuel Type</Text>
-                      <Text style={styles.detailValue}>{vehicle.fuel_type}</Text>
+
+                  {/* Active Trip Indicator */}
+                  {vehicle.active_trip && (
+                    <View style={[
+                      styles.activeTripIndicator,
+                      vehicle.active_trip.driver_id === user?.id ? styles.myActiveTripIndicator : styles.otherActiveTripIndicator
+                    ]}>
+                      <View style={styles.activeTripHeader}>
+                        <Icon 
+                          name={vehicle.active_trip.driver_id === user?.id ? "checkmark-circle" : "car"} 
+                          size={16} 
+                          color={vehicle.active_trip.driver_id === user?.id ? "#059669" : "#6B7280"} 
+                        />
+                        <Text style={[
+                          styles.activeTripTitle,
+                          vehicle.active_trip.driver_id === user?.id ? styles.myActiveTripTitle : styles.otherActiveTripTitle
+                        ]}>
+                          {vehicle.active_trip.driver_id === user?.id ? '🚗 Your Active Trip' : 'Active Trip (Other Driver)'}
+                        </Text>
+                      </View>
+                      <View style={styles.activeTripInfo}>
+                        {vehicle.active_trip.driver_id !== user?.id && (
+                          <View style={styles.activeTripRow}>
+                            <Icon name="person" size={14} color="#6B7280" />
+                            <Text style={styles.activeTripLabel}>Driver:</Text>
+                            <Text style={styles.activeTripValue}>{vehicle.active_trip.driver_name}</Text>
+                          </View>
+                        )}
+                        <View style={styles.activeTripRow}>
+                          <Icon name="navigate" size={14} color="#6B7280" />
+                          <Text style={styles.activeTripLabel}>To:</Text>
+                          <Text style={styles.activeTripValue} numberOfLines={1}>{vehicle.active_trip.destination}</Text>
+                        </View>
+                        <View style={styles.activeTripRow}>
+                          <Icon name="ticket" size={14} color="#6B7280" />
+                          <Text style={styles.activeTripLabel}>Trip #:</Text>
+                          <Text style={styles.activeTripValue}>{vehicle.active_trip.id}</Text>
+                        </View>
+                      </View>
                     </View>
                   )}
-                  
-                  {vehicle.color && (
-                    <View style={styles.detailItem}>
-                      <Text style={styles.detailLabel}>Color</Text>
-                      <Text style={styles.detailValue}>{vehicle.color}</Text>
+
+                  {vehicle.status_notes && (
+                    <View style={styles.statusNotesDisplay}>
+                      <Icon name="information-circle" size={16} color="#65676B" />
+                      <Text style={styles.statusNotesText}>{vehicle.status_notes}</Text>
                     </View>
                   )}
-                  
-                  <View style={styles.detailItem}>
-                    <Text style={styles.detailLabel}>Added On</Text>
-                    <Text style={styles.detailValue}>{formatDate(vehicle.created_at)}</Text>
+
+                  <View style={styles.vehicleActions}>
+                    <TouchableOpacity 
+                      style={styles.statusButton} 
+                      onPress={() => openStatusModal(vehicle)}
+                    >
+                      <Icon name="refresh" size={16} color="#10b981" />
+                      <Text style={styles.statusButtonText}>Status</Text>
+                    </TouchableOpacity>
+                    
+                    {canManageFuel(vehicle) ? (
+                      <TouchableOpacity 
+                        style={styles.fuelButton} 
+                        onPress={() => router.push({
+                          pathname: '/fuel-status',
+                          params: { vehicleId: vehicle.id.toString() }
+                        })}
+                      >
+                        <Icon name="water" size={16} color="#3b82f6" />
+                        <Text style={styles.fuelButtonText}>Fuel</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <View style={styles.fuelButtonDisabled}>
+                        <Icon name="lock-closed" size={16} color="#9CA3AF" />
+                        <Text style={styles.fuelButtonDisabledText}>Fuel</Text>
+                      </View>
+                    )}
                   </View>
+                  
+                  {!canManageFuel(vehicle) && vehicle.license_restriction && vehicle.license_restriction !== 'Any' && (
+                    <View style={styles.licenseRestrictionNotice}>
+                      <Icon name="information-circle" size={14} color="#F59E0B" />
+                      <Text style={styles.licenseRestrictionText}>
+                        Requires {vehicle.license_restriction} license to manage fuel
+                      </Text>
+                    </View>
+                  )}
                 </View>
               </View>
-            </View>
+            ))}
 
             {/* Fuel Records Card */}
             <View style={styles.fuelCard}>
@@ -687,16 +799,10 @@ export default function VehiclesScreen() {
                   <View style={styles.fuelHeaderText}>
                     <Text style={styles.fuelTitle}>Fuel Management</Text>
                     <Text style={styles.fuelSubtitle}>
-                      {fuelRecords.length} record{fuelRecords.length !== 1 ? 's' : ''} • End Balance: {
-                        fuelRecords.reduce((sum, record) => sum + (parseFloat(record.amount?.toString() || '0') || 0), 0).toFixed(2)
-                      } L
+                      {fuelRecords.length} record{fuelRecords.length !== 1 ? 's' : ''}
                     </Text>
                   </View>
                 </View>
-                <TouchableOpacity style={styles.addFuelButton} onPress={openFuelModal}>
-                  <Icon name="add" size={16} color="#f59e0b" />
-                  <Text style={styles.addFuelButtonText}>Add Fuel</Text>
-                </TouchableOpacity>
               </View>
 
               {/* Fuel Summary */}
@@ -707,7 +813,7 @@ export default function VehiclesScreen() {
                     <View style={styles.fuelSummaryText}>
                       <Text style={styles.fuelSummaryLabel}>Total Added</Text>
                       <Text style={[styles.fuelSummaryValue, { color: '#10b981' }]}>
-                        +{fuelRecords.filter(r => parseFloat(r.amount?.toString() || '0') > 0)
+                        +{fuelRecords.filter((r: any) => r.type === 'add')
                           .reduce((sum, record) => sum + (parseFloat(record.amount?.toString() || '0') || 0), 0).toFixed(2)} L
                       </Text>
                     </View>
@@ -718,7 +824,7 @@ export default function VehiclesScreen() {
                     <View style={styles.fuelSummaryText}>
                       <Text style={styles.fuelSummaryLabel}>Total Used</Text>
                       <Text style={[styles.fuelSummaryValue, { color: '#ef4444' }]}>
-                        {fuelRecords.filter(r => parseFloat(r.amount?.toString() || '0') < 0)
+                        -{fuelRecords.filter((r: any) => r.type === 'usage')
                           .reduce((sum, record) => sum + (parseFloat(record.amount?.toString() || '0') || 0), 0).toFixed(2)} L
                       </Text>
                     </View>
@@ -727,9 +833,12 @@ export default function VehiclesScreen() {
                   <View style={styles.fuelSummaryItem}>
                     <Icon name="speedometer" size={20} color="#3b82f6" />
                     <View style={styles.fuelSummaryText}>
-                      <Text style={styles.fuelSummaryLabel}>Balance End</Text>
+                      <Text style={styles.fuelSummaryLabel}>Balance</Text>
                       <Text style={[styles.fuelSummaryValue, { color: '#3b82f6', fontWeight: 'bold' }]}>
-                        {fuelRecords.reduce((sum, record) => sum + (parseFloat(record.amount?.toString() || '0') || 0), 0).toFixed(2)} L
+                        {fuelRecords.reduce((sum, record: any) => {
+                          const amount = parseFloat(record.amount?.toString() || '0') || 0;
+                          return record.type === 'usage' ? sum - amount : sum + amount;
+                        }, 0).toFixed(2)} L
                       </Text>
                     </View>
                   </View>
@@ -739,40 +848,56 @@ export default function VehiclesScreen() {
               <View style={styles.fuelContent}>
                 {fuelRecords.length > 0 ? (
                   <ScrollView showsVerticalScrollIndicator={false}>
-                    {fuelRecords.map((record) => {
+                    {fuelRecords.map((record: any) => {
                       const amount = parseFloat(record.amount?.toString() || '0');
-                      const isConsumption = amount < 0;
+                      const isUsage = record.type === 'usage';
+                      
+                      // Debug logging
+                      console.log('🔍 Rendering fuel record:', {
+                        id: record.id,
+                        type: record.type,
+                        isUsage,
+                        amount,
+                        purpose: record.purpose
+                      });
+                      
                       return (
                         <View key={record.id} style={[
                           styles.fuelRecordItem,
-                          isConsumption && styles.fuelRecordItemConsumption
+                          isUsage && styles.fuelRecordItemConsumption
                         ]}>
-                          <View style={styles.fuelRecordHeader}>
-                            <View style={styles.fuelRecordDateContainer}>
-                              <Icon 
-                                name={isConsumption ? "remove-circle" : "add-circle"} 
-                                size={16} 
-                                color={isConsumption ? "#ef4444" : "#10b981"} 
-                              />
-                              <Text style={styles.fuelRecordDate}>{formatDate(record.date)}</Text>
+                          <View style={{ flex: 1 }}>
+                            <View style={styles.fuelRecordHeader}>
+                              <View style={styles.fuelRecordDateContainer}>
+                                <Icon 
+                                  name={isUsage ? "remove-circle" : "add-circle"} 
+                                  size={16} 
+                                  color={isUsage ? "#ef4444" : "#10b981"} 
+                                />
+                                <Text style={styles.fuelRecordDate}>{formatDate(record.date)}</Text>
+                              </View>
+                              <View style={[styles.fuelTypeBadge, { backgroundColor: getFuelTypeColor(record.fuel_type) }]}>
+                                <Text style={styles.fuelTypeBadgeText}>{record.fuel_type}</Text>
+                              </View>
                             </View>
-                            <View style={[styles.fuelTypeBadge, { backgroundColor: getFuelTypeColor(record.fuel_type) }]}>
-                              <Text style={styles.fuelTypeBadgeText}>{record.fuel_type}</Text>
-                            </View>
+                            {record.purpose && (
+                              <Text style={styles.fuelRecordPurpose}>{record.purpose}</Text>
+                            )}
                           </View>
-                          <Text style={[
-                            styles.fuelRecordAmount,
-                            { color: isConsumption ? '#ef4444' : '#10b981' }
-                          ]}>
-                            {isConsumption ? '' : '+'}{amount.toFixed(2)} L
-                          </Text>
-                          {isConsumption ? (
-                            <Text style={styles.fuelRecordLabel}>Consumption</Text>
-                          ) : (
-                            <Text style={[styles.fuelRecordLabel, { color: '#10b981' }]}>
-                              {amount > 50 ? 'Issued/Purchased' : 'Added'}
+                          <View style={{ alignItems: 'flex-end' }}>
+                            <Text style={[
+                              styles.fuelRecordAmount,
+                              { color: isUsage ? '#ef4444' : '#10b981' }
+                            ]}>
+                              {isUsage ? '-' : '+'}{amount.toFixed(2)} L
                             </Text>
-                          )}
+                            <Text style={[
+                              styles.fuelRecordLabel,
+                              { color: isUsage ? '#ef4444' : '#10b981' }
+                            ]}>
+                              {isUsage ? 'Usage' : (amount > 50 ? 'Issued/Purchased' : 'Added')}
+                            </Text>
+                          </View>
                         </View>
                       );
                     })}
@@ -796,12 +921,8 @@ export default function VehiclesScreen() {
               </View>
               <Text style={styles.noVehicleTitle}>No Vehicle Assigned</Text>
               <Text style={styles.noVehicleText}>
-                You don&apos;t have a vehicle assigned yet. Add your vehicle to start managing trips.
+                You don&apos;t have a vehicle assigned yet. Please contact your administrator.
               </Text>
-              <TouchableOpacity style={styles.addVehicleButton} onPress={openAddModal}>
-                <Icon name="add" size={20} color="#fff" />
-                <Text style={styles.addVehicleButtonText}>Add My Vehicle</Text>
-              </TouchableOpacity>
             </View>
           </View>
         )}
@@ -809,306 +930,6 @@ export default function VehiclesScreen() {
         {/* Bottom Spacing */}
         <View style={styles.bottomSpacing} />
       </ScrollView>
-
-      {/* Add Vehicle Modal */}
-      <Modal
-        visible={showAddModal}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setShowAddModal(false)}
-      >
-        <KeyboardAvoidingView 
-          style={styles.modalContainer}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-        >
-          <View style={styles.modalHeader}>
-            <TouchableOpacity onPress={() => setShowAddModal(false)}>
-              <Icon name="close" size={24} color="#050505" />
-            </TouchableOpacity>
-            <Text style={styles.modalTitle}>Add Vehicle</Text>
-            <View style={{ width: 24 }} />
-          </View>
-          
-          <ScrollView 
-            style={styles.modalContent} 
-            showsVerticalScrollIndicator={false}
-            contentInsetAdjustmentBehavior="automatic"
-            keyboardShouldPersistTaps="handled"
-            contentContainerStyle={{ paddingBottom: Platform.OS === 'ios' ? 40 : 80 }}
-          >
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Plate Number *</Text>
-              <TextInput
-                style={[styles.formInput, errors.plate_number && styles.formInputError]}
-                value={formData.plate_number}
-                onChangeText={(text) => setFormData({ ...formData, plate_number: text })}
-                placeholder="Enter plate number"
-                autoCapitalize="characters"
-              />
-              {errors.plate_number && <Text style={styles.errorText}>{errors.plate_number[0]}</Text>}
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Vehicle Type *</Text>
-              <View style={[styles.pickerContainer, errors.type && styles.formInputError]}>
-                <Picker
-                  selectedValue={formData.type || 'Sedan'}
-                  onValueChange={(value) => setFormData({ ...formData, type: value })}
-                  style={styles.picker}
-                >
-                  {VEHICLE_TYPES.map((type) => (
-                    <Picker.Item key={type} label={type} value={type} />
-                  ))}
-                </Picker>
-                <Icon name="chevron-down" size={20} color="#9CA3AF" style={styles.pickerIcon} />
-              </View>
-              {errors.type && <Text style={styles.errorText}>{errors.type[0]}</Text>}
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Model *</Text>
-              <TextInput
-                style={[styles.formInput, errors.model && styles.formInputError]}
-                value={formData.model}
-                onChangeText={(text) => setFormData({ ...formData, model: text })}
-                placeholder="e.g., Toyota Hiace, Ford Transit"
-              />
-              {errors.model && <Text style={styles.errorText}>{errors.model[0]}</Text>}
-            </View>
-
-            <View style={styles.formRow}>
-              <View style={[styles.formGroup, { flex: 1, marginRight: 8 }]}>
-                <Text style={styles.formLabel}>Year *</Text>
-                <View style={[styles.pickerContainer, errors.year && styles.formInputError]}>
-                  <Picker
-                    selectedValue={parseInt(formData.year) || currentYear}
-                    onValueChange={(value) => setFormData({ ...formData, year: value.toString() })}
-                    style={styles.picker}
-                  >
-                    {YEAR_OPTIONS.map((year) => (
-                      <Picker.Item key={year} label={year.toString()} value={year} />
-                    ))}
-                  </Picker>
-                  <Icon name="chevron-down" size={20} color="#9CA3AF" style={styles.pickerIcon} />
-                </View>
-                {errors.year && <Text style={styles.errorText}>{errors.year[0]}</Text>}
-              </View>
-              
-              <View style={[styles.formGroup, { flex: 1, marginLeft: 8 }]}>
-                <Text style={styles.formLabel}>Capacity *</Text>
-                <View style={[styles.pickerContainer, errors.capacity && styles.formInputError]}>
-                  <Picker
-                    selectedValue={parseInt(formData.capacity) || 5}
-                    onValueChange={(value) => setFormData({ ...formData, capacity: value.toString() })}
-                    style={styles.picker}
-                  >
-                    {CAPACITY_OPTIONS.map((capacity) => (
-                      <Picker.Item key={capacity} label={capacity.toString()} value={capacity} />
-                    ))}
-                  </Picker>
-                  <Icon name="chevron-down" size={20} color="#9CA3AF" style={styles.pickerIcon} />
-                </View>
-                {errors.capacity && <Text style={styles.errorText}>{errors.capacity[0]}</Text>}
-              </View>
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Fuel Type</Text>
-              <View style={styles.pickerContainer}>
-                <Picker
-                  selectedValue={formData.fuel_type || 'Gasoline'}
-                  onValueChange={(value) => setFormData({ ...formData, fuel_type: value })}
-                  style={styles.picker}
-                >
-                  {FUEL_TYPES.map((fuelType) => (
-                    <Picker.Item key={fuelType} label={fuelType} value={fuelType} />
-                  ))}
-                </Picker>
-                <Icon name="chevron-down" size={20} color="#9CA3AF" style={styles.pickerIcon} />
-              </View>
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Color</Text>
-              <TextInput
-                style={styles.formInput}
-                value={formData.color}
-                onChangeText={(text) => setFormData({ ...formData, color: text })}
-                placeholder="e.g., White, Blue, Red"
-              />
-            </View>
-            
-            <TouchableOpacity
-              style={[styles.submitButton, isSubmitting && styles.submitButtonDisabled]}
-              onPress={handleAddVehicle}
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? (
-                <ActivityIndicator size="small" color="#fff" />
-              ) : (
-                <>
-                  <Icon name="checkmark" size={20} color="#fff" />
-                  <Text style={styles.submitButtonText}>Add Vehicle</Text>
-                </>
-              )}
-            </TouchableOpacity>
-            
-            {/* Bottom Safety Space */}
-            <View style={{ height: Platform.OS === 'ios' ? 50 : 100 }} />
-          </ScrollView>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* Edit Vehicle Modal */}
-      <Modal
-        visible={showEditModal}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setShowEditModal(false)}
-      >
-        <KeyboardAvoidingView 
-          style={styles.modalContainer}
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-          keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
-        >
-          <View style={styles.modalHeader}>
-            <TouchableOpacity onPress={() => setShowEditModal(false)}>
-              <Icon name="close" size={24} color="#050505" />
-            </TouchableOpacity>
-            <Text style={styles.modalTitle}>Edit Vehicle</Text>
-            <View style={{ width: 24 }} />
-          </View>
-          
-          <ScrollView 
-            style={styles.modalContent} 
-            showsVerticalScrollIndicator={false}
-            contentInsetAdjustmentBehavior="automatic"
-            keyboardShouldPersistTaps="handled"
-            contentContainerStyle={{ paddingBottom: Platform.OS === 'ios' ? 40 : 80 }}
-          >
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Plate Number *</Text>
-              <TextInput
-                style={[styles.formInput, errors.plate_number && styles.formInputError]}
-                value={formData.plate_number}
-                onChangeText={(text) => setFormData({ ...formData, plate_number: text })}
-                placeholder="Enter plate number"
-                autoCapitalize="characters"
-              />
-              {errors.plate_number && <Text style={styles.errorText}>{errors.plate_number[0]}</Text>}
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Vehicle Type *</Text>
-              <View style={[styles.pickerContainer, errors.type && styles.formInputError]}>
-                <Picker
-                  selectedValue={formData.type}
-                  onValueChange={(value) => setFormData({ ...formData, type: value })}
-                  style={styles.picker}
-                >
-                  {VEHICLE_TYPES.map((type) => (
-                    <Picker.Item key={type} label={type} value={type} />
-                  ))}
-                </Picker>
-                <Icon name="chevron-down" size={20} color="#9CA3AF" style={styles.pickerIcon} />
-              </View>
-              {errors.type && <Text style={styles.errorText}>{errors.type[0]}</Text>}
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Model *</Text>
-              <TextInput
-                style={[styles.formInput, errors.model && styles.formInputError]}
-                value={formData.model}
-                onChangeText={(text) => setFormData({ ...formData, model: text })}
-                placeholder="e.g., Toyota Hiace, Ford Transit"
-              />
-              {errors.model && <Text style={styles.errorText}>{errors.model[0]}</Text>}
-            </View>
-
-            <View style={styles.formRow}>
-              <View style={[styles.formGroup, { flex: 1, marginRight: 8 }]}>
-                <Text style={styles.formLabel}>Year *</Text>
-                <View style={[styles.pickerContainer, errors.year && styles.formInputError]}>
-                  <Picker
-                    selectedValue={parseInt(formData.year) || currentYear}
-                    onValueChange={(value) => setFormData({ ...formData, year: value.toString() })}
-                    style={styles.picker}
-                  >
-                    {YEAR_OPTIONS.map((year) => (
-                      <Picker.Item key={year} label={year.toString()} value={year} />
-                    ))}
-                  </Picker>
-                  <Icon name="chevron-down" size={20} color="#9CA3AF" style={styles.pickerIcon} />
-                </View>
-                {errors.year && <Text style={styles.errorText}>{errors.year[0]}</Text>}
-              </View>
-              
-              <View style={[styles.formGroup, { flex: 1, marginLeft: 8 }]}>
-                <Text style={styles.formLabel}>Capacity *</Text>
-                <View style={[styles.pickerContainer, errors.capacity && styles.formInputError]}>
-                  <Picker
-                    selectedValue={parseInt(formData.capacity) || 5}
-                    onValueChange={(value) => setFormData({ ...formData, capacity: value.toString() })}
-                    style={styles.picker}
-                  >
-                    {CAPACITY_OPTIONS.map((capacity) => (
-                      <Picker.Item key={capacity} label={capacity.toString()} value={capacity} />
-                    ))}
-                  </Picker>
-                  <Icon name="chevron-down" size={20} color="#9CA3AF" style={styles.pickerIcon} />
-                </View>
-                {errors.capacity && <Text style={styles.errorText}>{errors.capacity[0]}</Text>}
-              </View>
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Fuel Type</Text>
-              <View style={styles.pickerContainer}>
-                <Picker
-                  selectedValue={formData.fuel_type || 'Gasoline'}
-                  onValueChange={(value) => setFormData({ ...formData, fuel_type: value })}
-                  style={styles.picker}
-                >
-                  {FUEL_TYPES.map((fuelType) => (
-                    <Picker.Item key={fuelType} label={fuelType} value={fuelType} />
-                  ))}
-                </Picker>
-                <Icon name="chevron-down" size={20} color="#9CA3AF" style={styles.pickerIcon} />
-              </View>
-            </View>
-
-            <View style={styles.formGroup}>
-              <Text style={styles.formLabel}>Color</Text>
-              <TextInput
-                style={styles.formInput}
-                value={formData.color}
-                onChangeText={(text) => setFormData({ ...formData, color: text })}
-                placeholder="e.g., White, Blue, Red"
-              />
-            </View>
-            
-            <TouchableOpacity
-              style={[styles.submitButton, isSubmitting && styles.submitButtonDisabled]}
-              onPress={handleUpdateVehicle}
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? (
-                <ActivityIndicator size="small" color="#fff" />
-              ) : (
-                <>
-                  <Icon name="checkmark" size={20} color="#fff" />
-                  <Text style={styles.submitButtonText}>Update Vehicle</Text>
-                </>
-              )}
-            </TouchableOpacity>
-            
-            {/* Bottom Safety Space */}
-            <View style={{ height: Platform.OS === 'ios' ? 50 : 100 }} />
-          </ScrollView>
-        </KeyboardAvoidingView>
-      </Modal>
 
       {/* Status Update Modal */}
       <Modal
@@ -1128,48 +949,112 @@ export default function VehiclesScreen() {
           
           <View style={styles.modalContent}>
             <Text style={styles.statusModalDescription}>
-              Current status: <Text style={{ fontWeight: 'bold', color: getStatusColor(vehicle?.status || 'Available') }}>{vehicle?.status}</Text>
+              Current status: <Text style={{ fontWeight: 'bold', color: getStatusColor(selectedVehicle?.status || 'Available') }}>{selectedVehicle?.status}</Text>
             </Text>
             
-            <View style={styles.statusOptions}>
-              {(['Available', 'Maintenance', 'Out of Service'] as Vehicle['status'][]).map((status) => (
-                <TouchableOpacity
-                  key={status}
-                  style={[
-                    styles.statusOption,
-                    vehicle?.status === status && styles.statusOptionSelected
-                  ]}
-                  onPress={() => handleUpdateStatus(status)}
-                  disabled={isSubmitting || vehicle?.status === status}
-                >
-                  {isSubmitting && vehicle?.status !== status ? (
-                    <ActivityIndicator size={24} color={getStatusColor(status)} />
-                  ) : (
-                    <Icon
-                      name={getStatusIcon(status)}
-                      size={24}
-                      color={vehicle?.status === status ? '#fff' : getStatusColor(status)}
+            {!selectedStatus ? (
+              <>
+                <View style={styles.statusOptions}>
+                  {(['Available', 'Maintenance', 'Out of Service'] as Vehicle['status'][]).map((status) => (
+                    <TouchableOpacity
+                      key={status}
+                      style={[
+                        styles.statusOption,
+                        selectedVehicle?.status === status && styles.statusOptionSelected
+                      ]}
+                      onPress={() => handleStatusSelection(status)}
+                      disabled={isSubmitting || selectedVehicle?.status === status}
+                    >
+                      {isSubmitting && selectedVehicle?.status !== status ? (
+                        <ActivityIndicator size={24} color={getStatusColor(status)} />
+                      ) : (
+                        <Icon
+                          name={getStatusIcon(status)}
+                          size={24}
+                          color={selectedVehicle?.status === status ? '#fff' : getStatusColor(status)}
+                        />
+                      )}
+                      <Text
+                        style={[
+                          styles.statusOptionText,
+                          selectedVehicle?.status === status && styles.statusOptionTextSelected
+                        ]}
+                      >
+                        {status}
+                      </Text>
+                      {selectedVehicle?.status === status && (
+                        <Icon name="checkmark" size={16} color="#fff" style={{ marginLeft: 8 }} />
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                
+                {/* Status updates immediately when tapped (for Available) */}
+                <Text style={[styles.statusModalDescription, { textAlign: 'center', marginTop: 16, fontSize: 12 }]}>
+                  Maintenance and Out of Service will require a reason
+                </Text>
+              </>
+            ) : (
+              <>
+                <View style={styles.statusNotesContainer}>
+                  <View style={styles.statusNotesHeader}>
+                    <Icon 
+                      name={getStatusIcon(selectedStatus)} 
+                      size={32} 
+                      color={getStatusColor(selectedStatus)} 
                     />
-                  )}
-                  <Text
-                    style={[
-                      styles.statusOptionText,
-                      vehicle?.status === status && styles.statusOptionTextSelected
-                    ]}
-                  >
-                    {status}
+                    <Text style={[styles.statusNotesTitle, { color: getStatusColor(selectedStatus) }]}>
+                      {selectedStatus}
+                    </Text>
+                  </View>
+                  
+                  <Text style={styles.inputLabel}>Reason / Notes *</Text>
+                  <TextInput
+                    style={[styles.textInput, styles.textArea]}
+                    value={statusNotes}
+                    onChangeText={setStatusNotes}
+                    placeholder={`Why is the vehicle ${selectedStatus === 'Maintenance' ? 'under maintenance' : 'out of service'}?`}
+                    multiline
+                    numberOfLines={4}
+                    textAlignVertical="top"
+                  />
+                  <Text style={styles.helpText}>
+                    This will be visible to users when they create travel requests
                   </Text>
-                  {vehicle?.status === status && (
-                    <Icon name="checkmark" size={16} color="#fff" style={{ marginLeft: 8 }} />
-                  )}
-                </TouchableOpacity>
-              ))}
-            </View>
-            
-            {/* Status updates immediately when tapped */}
-            <Text style={[styles.statusModalDescription, { textAlign: 'center', marginTop: 16 }]}>
-              Tap any status above to update immediately
-            </Text>
+                  
+                  <View style={styles.statusNotesActions}>
+                    <TouchableOpacity 
+                      style={styles.statusCancelButton}
+                      onPress={() => {
+                        setSelectedStatus(null);
+                        setStatusNotes('');
+                      }}
+                      disabled={isSubmitting}
+                    >
+                      <Text style={styles.statusCancelButtonText}>Cancel</Text>
+                    </TouchableOpacity>
+                    
+                    <TouchableOpacity 
+                      style={[
+                        styles.statusConfirmButton,
+                        (!statusNotes.trim() || isSubmitting) && styles.statusConfirmButtonDisabled
+                      ]}
+                      onPress={confirmStatusWithNotes}
+                      disabled={!statusNotes.trim() || isSubmitting}
+                    >
+                      {isSubmitting ? (
+                        <ActivityIndicator size="small" color="#fff" />
+                      ) : (
+                        <>
+                          <Icon name="checkmark-circle" size={20} color="#fff" />
+                          <Text style={styles.statusConfirmButtonText}>Update Status</Text>
+                        </>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </>
+            )}
           </View>
         </View>
       </Modal>
@@ -1187,13 +1072,28 @@ export default function VehiclesScreen() {
         >
           <View style={styles.fuelModalContent}>
             <View style={styles.fuelModalHeader}>
-              <Text style={styles.fuelModalTitle}>Add Fuel Record</Text>
+              <Text style={styles.fuelModalTitle}>
+                {fuelActionType === 'usage' ? 'Record Fuel Usage' : 'Record Fuel Purchase'}
+              </Text>
               <TouchableOpacity onPress={() => setShowFuelModal(false)}>
                 <Icon name="close" size={24} color="#65676B" />
               </TouchableOpacity>
             </View>
 
             <ScrollView style={styles.fuelModalBody} showsVerticalScrollIndicator={false}>
+              {/* Information Banner */}
+              <View style={styles.personalFuelBanner}>
+                <Icon name="information-circle" size={20} color="#10b981" />
+                <View style={styles.personalFuelBannerText}>
+                  <Text style={styles.personalFuelBannerTitle}>Personal Fuel Tracking</Text>
+                  <Text style={styles.personalFuelBannerDescription}>
+                    {fuelActionType === 'usage' 
+                      ? 'Track fuel used for urgent trips without an official trip ticket.'
+                      : 'Track personal fuel purchases and refills outside of official trip logs.'}
+                  </Text>
+                </View>
+              </View>
+
               {/* Date Input */}
               <View style={styles.inputGroup}>
                 <Text style={styles.inputLabel}>Date *</Text>
@@ -1209,7 +1109,9 @@ export default function VehiclesScreen() {
 
               {/* Amount Input */}
               <View style={styles.inputGroup}>
-                <Text style={styles.inputLabel}>Fuel Amount (Liters) *</Text>
+                <Text style={styles.inputLabel}>
+                  Fuel Amount (Liters) * {fuelActionType === 'usage' && '(Used)'}
+                </Text>
                 <TextInput
                   style={styles.textInput}
                   value={fuelFormData.amount}
@@ -1219,6 +1121,38 @@ export default function VehiclesScreen() {
                   placeholderTextColor="#9ca3af"
                 />
               </View>
+
+              {/* Purpose Input - Only for usage */}
+              {fuelActionType === 'usage' && (
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Purpose/Reason *</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    value={fuelFormData.purpose}
+                    onChangeText={(text) => setFuelFormData({ ...fuelFormData, purpose: text })}
+                    placeholder="E.g., Emergency errand, urgent delivery, etc."
+                    placeholderTextColor="#9ca3af"
+                    multiline
+                    numberOfLines={3}
+                    textAlignVertical="top"
+                  />
+                </View>
+              )}
+
+              {/* Odometer Input - Optional for usage */}
+              {fuelActionType === 'usage' && (
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Odometer Reading (Optional)</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    value={fuelFormData.odometer}
+                    onChangeText={(text) => setFuelFormData({ ...fuelFormData, odometer: text })}
+                    placeholder="Current odometer reading"
+                    keyboardType="numeric"
+                    placeholderTextColor="#9ca3af"
+                  />
+                </View>
+              )}
 
               {/* Fuel Type Selector */}
               <View style={styles.inputGroup}>
@@ -1260,7 +1194,9 @@ export default function VehiclesScreen() {
                 {isSubmitting ? (
                   <ActivityIndicator size="small" color="#fff" />
                 ) : (
-                  <Text style={styles.fuelSubmitButtonText}>Add Fuel Record</Text>
+                  <Text style={styles.fuelSubmitButtonText}>
+                    {fuelActionType === 'usage' ? 'Record Usage' : 'Add Fuel Record'}
+                  </Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -1306,10 +1242,10 @@ const styles = StyleSheet.create({
     padding: 20,
     paddingTop: 40,
     paddingBottom: 10,
-    minHeight: 60, // Ensure minimum height for content
-    backgroundColor: '#FFFFFF', // TripManager primary brand color
+    minHeight: 60,
+    backgroundColor: '#FFFFFF',
     borderBottomWidth: 1,
-    borderBottomColor: '#C28F22', // TripManager secondary brand color
+    borderBottomColor: '#C28F22',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -1322,15 +1258,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  headerTitleContainer: {
+  titleContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
   },
-  headerTitle: {
+  title: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: '#000000',
+    color: '#050505',
+  },
+  vehicleCountBadge: {
+    backgroundColor: '#3E0703',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 50,
+    minWidth: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  vehicleCountText: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    color: '#fff',
   },
   addButton: {
     flexDirection: 'row',
@@ -1349,45 +1299,93 @@ const styles = StyleSheet.create({
   // Content Styles
   content: {
     flex: 1,
-    padding: 16,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+  },
+
+  // Fleet Statistics Styles
+  statsCard: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    marginBottom: 12,
+    padding: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.03,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  statsGrid: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  statItem: {
+    flex: 1,
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: 6,
+    backgroundColor: '#FAFAFA',
+    gap: 4,
+  },
+  statIconContainer: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  statValue: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1F2937',
+  },
+  statLabel: {
+    fontSize: 10,
+    color: '#6B7280',
+    fontWeight: '500',
   },
 
   // Vehicle Card Styles
   vehicleCard: {
     backgroundColor: '#fff',
-    borderRadius: 8,
-    marginBottom: 16,
+    borderRadius: 12,
+    marginBottom: 12,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
     overflow: 'hidden',
   },
   vehicleHeader: {
     backgroundColor: '#FFFFFF',
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 10,
   },
   vehicleHeaderContent: {
     flexDirection: 'row',
     alignItems: 'center',
   },
   vehicleHeaderText: {
-    marginLeft: 12,
+    marginLeft: 10,
     flex: 1,
   },
   vehicleTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#000',
-    marginBottom: 4,
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#1F2937',
+    letterSpacing: -0.3,
   },
   vehicleSubtitle: {
-    fontSize: 14,
-    color: '#b6b6b6ff',
+    fontSize: 13,
+    color: '#6B7280',
+    marginTop: 2,
   },
   vehicleContent: {
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingBottom: 14,
   },
   vehicleMainInfo: {
     flexDirection: 'row',
@@ -1418,18 +1416,56 @@ const styles = StyleSheet.create({
   },
   statusBadge: {
     alignSelf: 'flex-start',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
   },
   statusText: {
     color: '#fff',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  statusNotesDisplay: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginTop: 8,
+    marginBottom: 4,
+    backgroundColor: '#FFFBEB',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 6,
+    borderLeftWidth: 3,
+    borderLeftColor: '#F59E0B',
+    gap: 6,
+  },
+  statusNotesText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#92400E',
+    lineHeight: 18,
   },
   vehicleActions: {
     flexDirection: 'row',
-    gap: 12,
+    gap: 8,
+    marginTop: 10,
+  },
+  vehicleDetailsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 10,
+    marginTop: 4,
+  },
+  vehicleDetailItem: {
+    flex: 1,
+    minWidth: '45%',
+    backgroundColor: '#F9FAFB',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#F3F4F6',
   },
   editButton: {
     flex: 1,
@@ -1439,6 +1475,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0F2F5',
     paddingVertical: 12,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#CCD0D5',
   },
   editButtonText: {
     color: '#3E0703',
@@ -1450,28 +1488,132 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#f0fdf4',
-    paddingVertical: 12,
+    backgroundColor: '#ECFDF5',
+    paddingVertical: 10,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#6EE7B7',
+    gap: 6,
   },
   statusButtonText: {
-    color: '#10b981',
+    color: '#059669',
     fontWeight: '600',
-    marginLeft: 8,
+    fontSize: 13,
   },
   fuelButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#fffbeb',
-    paddingVertical: 12,
+    backgroundColor: '#EFF6FF',
+    paddingVertical: 10,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#93C5FD',
+    gap: 6,
   },
   fuelButtonText: {
-    color: '#f59e0b',
+    color: '#2563EB',
     fontWeight: '600',
-    marginLeft: 8,
+    fontSize: 13,
+  },
+  fuelButtonDisabled: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F3F4F6',
+    paddingVertical: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#D1D5DB',
+    gap: 6,
+    opacity: 0.6,
+  },
+  fuelButtonDisabledText: {
+    color: '#9CA3AF',
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  licenseRestrictionNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFBEB',
+    borderLeftWidth: 3,
+    borderLeftColor: '#F59E0B',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 8,
+    borderRadius: 6,
+    gap: 8,
+  },
+  licenseRestrictionText: {
+    fontSize: 12,
+    color: '#92400E',
+    fontWeight: '500',
+    flex: 1,
+  },
+
+  // Fuel Indicator Styles (in vehicle card)
+  fuelIndicatorContainer: {
+    backgroundColor: '#F9FAFB',
+    borderRadius: 8,
+    padding: 12,
+    marginTop: 10,
+    marginBottom: 4,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+  },
+  fuelIndicatorHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  fuelIndicatorLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  fuelIndicatorLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#374151',
+  },
+  fuelIndicatorValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1F2937',
+  },
+  fuelIndicatorValueEmpty: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#9CA3AF',
+    fontStyle: 'italic',
+  },
+  fuelProgressBar: {
+    height: 8,
+    backgroundColor: '#E5E7EB',
+    borderRadius: 4,
+    overflow: 'hidden',
+    marginBottom: 6,
+  },
+  fuelProgressFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  fuelPercentageText: {
+    fontSize: 11,
+    color: '#6B7280',
+    textAlign: 'right',
+    fontWeight: '500',
+  },
+  fuelEmptyMessage: {
+    fontSize: 11,
+    color: '#9CA3AF',
+    fontStyle: 'italic',
+    textAlign: 'center',
+    marginTop: 4,
   },
 
   // Details Card Styles
@@ -1522,48 +1664,50 @@ const styles = StyleSheet.create({
     borderColor: '#CCD0D5',
   },
   detailLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#65676B',
-    marginBottom: 4,
+    fontSize: 11,
+    color: '#6B7280',
+    marginBottom: 3,
+    fontWeight: '500',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
   },
   detailValue: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: '#050505',
+    fontSize: 15,
+    color: '#1F2937',
+    fontWeight: '600',
   },
 
   // No Vehicle Styles
   noVehicleCard: {
     backgroundColor: '#fff',
-    borderRadius: 8,
+    borderRadius: 12,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
   },
   noVehicleContent: {
-    padding: 32,
+    padding: 40,
     alignItems: 'center',
   },
   noVehicleIcon: {
-    marginBottom: 24,
+    marginBottom: 20,
   },
   noVehicleTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#050505',
-    marginBottom: 12,
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1F2937',
+    marginBottom: 8,
     textAlign: 'center',
+    letterSpacing: -0.3,
   },
   noVehicleText: {
-    fontSize: 16,
-    color: '#65676B',
+    fontSize: 14,
+    color: '#6B7280',
     textAlign: 'center',
-    lineHeight: 24,
-    marginBottom: 24,
-    maxWidth: 300,
+    lineHeight: 22,
+    maxWidth: 280,
   },
   addVehicleButton: {
     flexDirection: 'row',
@@ -1741,6 +1885,65 @@ const styles = StyleSheet.create({
   statusOptionTextSelected: {
     color: '#fff',
   },
+  statusNotesContainer: {
+    marginTop: 16,
+  },
+  statusNotesHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 24,
+    gap: 12,
+  },
+  statusNotesTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+  },
+  textArea: {
+    minHeight: 100,
+    paddingTop: 12,
+  },
+  helpText: {
+    fontSize: 12,
+    color: '#65676B',
+    marginTop: 8,
+    fontStyle: 'italic',
+  },
+  statusNotesActions: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 24,
+  },
+  statusCancelButton: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: '#F0F2F5',
+    alignItems: 'center',
+  },
+  statusCancelButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#050505',
+  },
+  statusConfirmButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    borderRadius: 8,
+    backgroundColor: '#3E0703',
+    gap: 8,
+  },
+  statusConfirmButtonDisabled: {
+    opacity: 0.5,
+  },
+  statusConfirmButtonText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
 
   // Fuel Modal Styles
   fuelModalOverlay: {
@@ -1772,6 +1975,32 @@ const styles = StyleSheet.create({
   },
   fuelModalBody: {
     padding: 20,
+    marginBottom: 10,
+  },
+  personalFuelBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#f0fdf4',
+    borderWidth: 1,
+    borderColor: '#10b981',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+    gap: 10,
+  },
+  personalFuelBannerText: {
+    flex: 1,
+  },
+  personalFuelBannerTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#065f46',
+    marginBottom: 4,
+  },
+  personalFuelBannerDescription: {
+    fontSize: 12,
+    color: '#065f46',
+    lineHeight: 18,
   },
   fuelModalFooter: {
     flexDirection: 'row',
@@ -1861,22 +2090,24 @@ const styles = StyleSheet.create({
   // Fuel Card Styles
   fuelCard: {
     backgroundColor: '#fff',
-    borderRadius: 8,
-    marginBottom: 16,
+    borderRadius: 12,
+    marginBottom: 12,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 2,
     overflow: 'hidden',
   },
   fuelHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#CCD0D5',
+    borderBottomColor: '#F3F4F6',
     backgroundColor: '#FFFFFF',
   },
   fuelHeaderContent: {
@@ -1885,32 +2116,84 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   fuelHeaderText: {
-    marginLeft: 12,
+    marginLeft: 10,
     flex: 1,
   },
   fuelTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#050505',
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#1F2937',
+    letterSpacing: -0.3,
   },
   fuelSubtitle: {
-    fontSize: 14,
-    color: '#65676B',
+    fontSize: 13,
+    color: '#6B7280',
     marginTop: 2,
+  },
+  fuelActionsSection: {
+    padding: 16,
+    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 1,
+    borderBottomColor: '#CCD0D5',
+  },
+  fuelActionsTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#050505',
+    marginBottom: 4,
+  },
+  fuelActionsSubtitle: {
+    fontSize: 13,
+    color: '#65676B',
+    marginBottom: 12,
+    fontStyle: 'italic',
+  },
+  fuelButtonsContainer: {
+    gap: 12,
   },
   addFuelButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#fef3c7',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
+    backgroundColor: '#ecfdf5',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#10b981',
   },
   addFuelButtonText: {
-    color: '#f59e0b',
+    color: '#10b981',
     fontWeight: '600',
-    fontSize: 14,
-    marginLeft: 4,
+    fontSize: 15,
+    marginLeft: 12,
+    flex: 1,
+  },
+  addFuelButtonSubtext: {
+    color: '#6b7280',
+    fontSize: 12,
+    marginLeft: 32,
+  },
+  usageFuelButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fef2f2',
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#ef4444',
+  },
+  usageFuelButtonText: {
+    color: '#ef4444',
+    fontWeight: '600',
+    fontSize: 15,
+    marginLeft: 12,
+    flex: 1,
+  },
+  usageFuelButtonSubtext: {
+    color: '#6b7280',
+    fontSize: 12,
+    marginLeft: 32,
   },
   fuelSummary: {
     flexDirection: 'row',
@@ -1996,10 +2279,63 @@ const styles = StyleSheet.create({
   fuelRecordLabel: {
     fontSize: 11,
     color: '#65676B',
+  },
+  
+  // Active Trip Indicator Styles
+  activeTripIndicator: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 8,
+    borderWidth: 1.5,
+  },
+  myActiveTripIndicator: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#059669',
+  },
+  otherActiveTripIndicator: {
+    backgroundColor: '#F3F4F6',
+    borderColor: '#D1D5DB',
+  },
+  activeTripHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  activeTripTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginLeft: 6,
+  },
+  myActiveTripTitle: {
+    color: '#059669',
+  },
+  otherActiveTripTitle: {
+    color: '#6B7280',
+  },
+  activeTripInfo: {
+    gap: 6,
+  },
+  activeTripRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  activeTripLabel: {
+    fontSize: 13,
+    color: '#6B7280',
+    fontWeight: '500',
+  },
+  activeTripValue: {
+    fontSize: 13,
+    color: '#1F2937',
+    fontWeight: '600',
+    flex: 1,
+  },
+  fuelRecordPurpose: {
+    fontSize: 12,
+    color: '#6b7280',
+    marginTop: 4,
     fontStyle: 'italic',
-    position: 'absolute',
-    bottom: 4,
-    right: 16,
   },
   noFuelRecords: {
     alignItems: 'center',
@@ -2021,6 +2357,6 @@ const styles = StyleSheet.create({
 
   // Bottom Spacing
   bottomSpacing: {
-    height: 40,
+    height: 20,
   },
 });

@@ -20,7 +20,7 @@ import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePickerModal from 'react-native-modal-datetime-picker';
-import MapView, { Marker } from 'react-native-maps';
+import MapView, { Marker, Polyline } from 'react-native-maps';
 import { TripLog, Vehicle, TripStats, TripTicket, LocationCoordinates } from '@/types';
 import ApiService from '@/services/api';
 import Icon from 'react-native-vector-icons/Ionicons';
@@ -29,6 +29,7 @@ import { ConfirmationModal } from '@/components/ConfirmationModal';
 import { SuccessModal } from '@/components/SuccessModal';
 import { useModals } from '@/hooks/useModals';
 import { NotificationBellButton } from '@/components/NotificationBellButton';
+import POSReceiptUpload from '@/components/POSReceiptUpload';
 
 // Define background location task
 const BACKGROUND_LOCATION_TASK = 'background-location-task';
@@ -103,6 +104,7 @@ export default function TripsScreen() {
   const [currentAddress, setCurrentAddress] = useState<string>('Location not available');
   const [mapRegion, setMapRegion] = useState<any>(null);
   const [locationHistory, setLocationHistory] = useState<Array<{location: LocationCoordinates, timestamp: Date}>>([]);
+  const [routeCoordinates, setRouteCoordinates] = useState<Array<{latitude: number, longitude: number}>>([]);
 
   // Animation for real-time location pulse
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -114,6 +116,7 @@ export default function TripsScreen() {
   // Trip logging modal state
   const [showTripLogModal, setShowTripLogModal] = useState(false);
   const [selectedTripTicket, setSelectedTripTicket] = useState<TripTicket | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [tripLogForm, setTripLogForm] = useState({
     trip_ticket_id: 0,
     vehicle_id: 0,
@@ -145,6 +148,16 @@ export default function TripsScreen() {
 
   // Time picker state
   const [showTimePicker, setShowTimePicker] = useState<string | null>(null);
+
+  // Text input states for decimal fields (to preserve decimal point while typing)
+  const [fuelIssuedText, setFuelIssuedText] = useState('');
+  const [fuelPurchasedText, setFuelPurchasedText] = useState('');
+  const [fuelUsedText, setFuelUsedText] = useState('');
+
+  // Available refuel records state
+  const [availableRefuels, setAvailableRefuels] = useState<any[]>([]);
+  const [selectedRefuelIds, setSelectedRefuelIds] = useState<number[]>([]);
+  const [showRefuelSelectionModal, setShowRefuelSelectionModal] = useState(false);
 
   // Debounce timer for form data saving
   const saveTimeoutRef = useRef<number | null>(null);
@@ -397,6 +410,61 @@ export default function TripsScreen() {
     React.useCallback(() => {
       console.log('Trips screen focused, refreshing data...');
       loadAllData();
+      
+      // Also refresh fuel balance and update trip log form if it's open
+      const refreshFuelBalance = async () => {
+        try {
+          // Get vehicles to access current fuel levels
+          const vehiclesData = await ApiService.getDriverVehicles();
+          
+          // Calculate total fuel balance from all vehicles (for legacy support)
+          const fuelRecordsResponse = await ApiService.getFuelRecords();
+          const updatedTotalFuel = fuelRecordsResponse.reduce((sum: number, record: any) => {
+            const amount = parseFloat(record.amount?.toString() || '0') || 0;
+            return record.type === 'usage' ? sum - amount : sum + amount;
+          }, 0);
+          
+          setTotalFuelBalance(updatedTotalFuel);
+          console.log('✅ Fuel balance refreshed on focus:', updatedTotalFuel, 'L');
+          
+          // Update trip log form if it's currently showing (preserving other values)
+          setTripLogForm(prev => {
+            // Don't update fuel if modal isn't open or vehicle_id not set
+            if (!prev.vehicle_id || prev.vehicle_id === 0) {
+              console.log('⏭️ Skipping fuel update - no vehicle assigned yet');
+              return prev;
+            }
+            
+            // Get the specific vehicle's fuel level
+            const assignedVehicle = vehiclesData.find((v: any) => v.id === prev.vehicle_id);
+            
+            if (!assignedVehicle) {
+              console.warn('⚠️ Vehicle not found during refresh:', prev.vehicle_id);
+              return prev; // Don't update if vehicle not found
+            }
+            
+            const vehicleFuelLevel = assignedVehicle.current_fuel_level !== null && assignedVehicle.current_fuel_level !== undefined
+              ? parseFloat(assignedVehicle.current_fuel_level.toString())
+              : 0;
+            
+            console.log(`⛽ Refreshing fuel for vehicle #${prev.vehicle_id} (${assignedVehicle.plate_number}):`, vehicleFuelLevel, 'L');
+            
+            return {
+              ...prev,
+              fuel_balance_start: vehicleFuelLevel,
+              // Recalculate fuel_total: balance + issued + purchased
+              fuel_total: vehicleFuelLevel + (prev.fuel_issued_office || 0) + (prev.fuel_purchased_trip || 0),
+              // Recalculate fuel_balance_end: total - used
+              fuel_balance_end: Math.max(0, vehicleFuelLevel + (prev.fuel_issued_office || 0) + (prev.fuel_purchased_trip || 0) - (prev.fuel_used || 0)),
+            };
+          });
+        } catch (error) {
+          console.error('Failed to refresh fuel balance:', error);
+        }
+      };
+      
+      refreshFuelBalance();
+      
       return () => {
         // Cleanup function
       };
@@ -539,10 +607,10 @@ export default function TripsScreen() {
       // Process fuel records
       setFuelRecords(fuelRecordsResponse);
       
-      // Calculate total fuel balance
+      // Calculate total fuel balance (add fuel additions, subtract fuel usage)
       const totalFuel = fuelRecordsResponse.reduce((sum: number, record: any) => {
         const amount = parseFloat(record.amount?.toString() || '0') || 0;
-        return sum + amount;
+        return record.type === 'usage' ? sum - amount : sum + amount;
       }, 0);
       
       setTotalFuelBalance(totalFuel);
@@ -673,6 +741,41 @@ export default function TripsScreen() {
     }
   };
 
+  // Calculate distance between two GPS coordinates using Haversine formula
+  const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: number): number => {
+    const R = 6371; // Radius of the Earth in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = 
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    const distance = R * c; // Distance in km
+    return distance;
+  };
+
+  // Calculate total distance traveled from route coordinates
+  const calculateTotalDistance = (): number => {
+    if (routeCoordinates.length < 2) return 0;
+    
+    let totalDistance = 0;
+    for (let i = 1; i < routeCoordinates.length; i++) {
+      const prev = routeCoordinates[i - 1];
+      const curr = routeCoordinates[i];
+      totalDistance += calculateDistance(
+        prev.latitude,
+        prev.longitude,
+        curr.latitude,
+        curr.longitude
+      );
+    }
+    
+    return totalDistance;
+  };
+
+
+
   const startGPSTracking = async () => {
     console.log('🎯 startGPSTracking called - isTracking:', isTracking, 'gpsStatus:', gpsStatus);
     console.log('📌 isMountedRef.current:', isMountedRef.current);
@@ -784,6 +887,15 @@ export default function TripsScreen() {
             return newHistory.slice(-10); // Increased from 5 to 10
           });
 
+          // Add to route coordinates for trail visualization
+          setRouteCoordinates(prev => [
+            ...prev,
+            {
+              latitude: updatedLocation.latitude,
+              longitude: updatedLocation.longitude,
+            }
+          ]);
+
           // Update map region to follow driver smoothly
           setMapRegion({
             latitude: updatedLocation.latitude,
@@ -882,6 +994,8 @@ export default function TripsScreen() {
     setGpsStatus('stopped');
     // Don't clear currentLocation and mapRegion - keep last known position visible
     // setCurrentLocation(null);
+    // Clear route coordinates when stopping
+    setRouteCoordinates([]);
     // setLocationHistory([]);
     
     console.log('✅ GPS tracking stopped successfully. Last position retained.');
@@ -1029,7 +1143,14 @@ export default function TripsScreen() {
   const confirmCompleteTrip = async () => {
     if (!activeTrip) return;
 
+    // Prevent multiple simultaneous calls
+    if (isSubmitting) {
+      console.log('⚠️ Trip completion already in progress, ignoring duplicate call');
+      return;
+    }
+
     try {
+      setIsSubmitting(true);
       const tripId = activeTrip.id; // Store trip ID before clearing state
       let tripLogData = null;
       
@@ -1040,10 +1161,43 @@ export default function TripsScreen() {
         
         if (savedData) {
           const parsedData = JSON.parse(savedData);
-          console.log('📝 Found saved trip log data, submitting before completing trip...');
+          console.log('📝 Found saved trip log data, validating required fields...');
           
-          // Submit the trip log if we have the required fields
-          if (parsedData.departure_time_office && parsedData.arrival_time_destination && parsedData.fuel_issued_office && parsedData.fuel_used) {
+          // Validate required fields (excluding optional fields)
+          const missingFields = [];
+          
+          // Time Information (all required)
+          if (!parsedData.departure_time_office) missingFields.push('Departure Time from Office');
+          if (!parsedData.arrival_time_destination) missingFields.push('Arrival Time at Destination');
+          if (!parsedData.departure_time_destination) missingFields.push('Departure Time from Destination');
+          if (!parsedData.arrival_time_office) missingFields.push('Arrival Time at Office');
+          
+          // Trip Details (all required)
+          if (!parsedData.destination || parsedData.destination.trim() === '') missingFields.push('Destination');
+          if (!parsedData.purpose || parsedData.purpose.trim() === '') missingFields.push('Purpose');
+          if (!parsedData.distance || parsedData.distance === 0) missingFields.push('Distance');
+          
+          // Fuel Information (required: fuel_balance_start, fuel_used, fuel_balance_end)
+          if (!parsedData.fuel_balance_start && parsedData.fuel_balance_start !== 0) missingFields.push('Fuel Balance Start');
+          if (!parsedData.fuel_total && parsedData.fuel_total !== 0) missingFields.push('Total Fuel');
+          if (!parsedData.fuel_used || parsedData.fuel_used === 0) missingFields.push('Fuel Used');
+          if (!parsedData.fuel_balance_end && parsedData.fuel_balance_end !== 0) missingFields.push('Fuel Balance End');
+          
+          // Note: Lubricants Information is optional (gear_oil, lubrication_oil, brake_fluid, grease)
+          // Note: Speedometer and Odometer are optional
+          // Note: fuel_purchased_trip is optional
+          
+          if (missingFields.length > 0) {
+            Alert.alert(
+              'Incomplete Trip Log',
+              `Please complete all required fields in the Trip Log before completing the trip:\n\n${missingFields.map(field => `• ${field}`).join('\n')}\n\nNote: Fuel Issued at Office, Fuel Purchased on Trip, Lubricants, and Speedometer/Odometer readings are optional.`,
+              [{ text: 'OK' }]
+            );
+            return;
+          }
+          
+          // Submit the trip log if we have all required fields
+          if (parsedData.departure_time_office && parsedData.arrival_time_destination && parsedData.fuel_used) {
             // Convert 12-hour format times to 24-hour format for backend
             const departure24 = convertTo24Hour(parsedData.departure_time_office);
             const arrivalDest24 = convertTo24Hour(parsedData.arrival_time_destination || '');
@@ -1084,14 +1238,41 @@ export default function TripsScreen() {
             } as any;
 
             try {
-              await ApiService.createTripLog(tripLogData);
-              console.log('✅ Trip log submitted successfully');
+              // Check if trip log already exists (409 response includes existing trip log)
+              let existingTripLog = null;
+              try {
+                console.log('📤 Request Data:', tripLogData);
+                await ApiService.createTripLog(tripLogData);
+                console.log('✅ Trip log created successfully');
+              } catch (createError: any) {
+                console.log('❌ Failed to create trip log:', createError);
+                if (createError.response?.status === 409 && createError.response?.data?.trip_log) {
+                  // Trip log already exists, update it instead
+                  existingTripLog = createError.response.data.trip_log;
+                  console.log('⚠️ Trip log already exists (ID:', existingTripLog.id, '), updating instead');
+                  console.log('📤 Update Data:', tripLogData);
+                  
+                  try {
+                    await ApiService.updateTripLog(existingTripLog.id, tripLogData);
+                    console.log('✅ Trip log updated successfully');
+                  } catch (updateError: any) {
+                    console.error('❌ Failed to update trip log:', updateError);
+                    console.error('Update error response:', updateError.response?.data);
+                    throw updateError; // Re-throw update error
+                  }
+                } else {
+                  throw createError; // Re-throw if it's a different error
+                }
+              }
               
               // Clear the saved form data after successful submission
               await AsyncStorage.removeItem(savedDataKey);
               console.log('✅ Cleared saved trip log data');
-            } catch (logError) {
+            } catch (logError: any) {
               console.error('❌ Failed to submit trip log:', logError);
+              
+              // For other errors, ask user what to do
+              setIsSubmitting(false); // Allow retry
               Alert.alert(
                 'Trip Log Error',
                 'Failed to save trip log. Do you still want to complete the trip?',
@@ -1110,13 +1291,31 @@ export default function TripsScreen() {
               return; // Wait for user decision
             }
           } else {
-            console.log('⚠️ Saved trip log data incomplete, skipping submission');
+            // If saved data exists but is incomplete, show error
+            Alert.alert(
+              'Incomplete Trip Log',
+              'Saved trip log data is incomplete. Please complete all required fields in the Trip Log before completing the trip.',
+              [{ text: 'OK' }]
+            );
+            return;
           }
         } else {
-          console.log('ℹ️ No saved trip log data found for this trip');
+          // No saved trip log data - require user to complete trip log first
+          Alert.alert(
+            'Trip Log Required',
+            'You must complete the Trip Log before finishing this trip. Please fill out all required trip information.',
+            [{ text: 'OK' }]
+          );
+          return;
         }
       } catch (storageError) {
         console.error('❌ Error checking for saved trip log:', storageError);
+        Alert.alert(
+          'Error',
+          'Unable to verify trip log data. Please try again.',
+          [{ text: 'OK' }]
+        );
+        return;
       }
       
       // Stop GPS tracking
@@ -1127,6 +1326,25 @@ export default function TripsScreen() {
 
       // Complete the trip via API
       await ApiService.completeTrip(tripId);
+
+      // Update fuel consumption if trip log data includes fuel_used and vehicle_id
+      if (tripLogData?.fuel_used && tripLogData.fuel_used > 0 && activeTrip.vehicle_id) {
+        try {
+          console.log(`⛽ Updating fuel consumption: ${tripLogData.fuel_used}L for vehicle ${activeTrip.vehicle_id}`);
+          await ApiService.updateFuelConsumption(activeTrip.vehicle_id, {
+            liters_consumed: tripLogData.fuel_used,
+            trip_ticket_id: tripId,
+            notes: `Fuel consumed during trip to ${tripLogData.destination || 'destination'}`,
+          });
+          console.log('✅ Fuel consumption updated successfully');
+        } catch (fuelError: any) {
+          console.error('❌ Failed to update fuel consumption:', fuelError);
+          // Don't block trip completion if fuel update fails
+          console.warn('⚠️ Continuing trip completion despite fuel update failure');
+        }
+      } else {
+        console.log('ℹ️ Skipping fuel consumption update - no fuel_used data or vehicle_id');
+      }
 
       // Send trip completion report to director and procurement
       try {
@@ -1195,18 +1413,71 @@ export default function TripsScreen() {
     } catch (error: any) {
       if (error.message === 'Trip completion cancelled') {
         // User cancelled, do nothing
+        setIsSubmitting(false);
         return;
       }
       console.error('Failed to complete trip:', error);
       Alert.alert('Error', 'Failed to complete trip. Please try again.');
       // Reload active trip in case of error
       loadActiveTrip();
+      setIsSubmitting(false);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const openTripLogModal = async (tripTicket: TripTicket) => {
+    // Always use the most current vehicle data
+    let currentVehicles = vehicles;
+    
+    // Check if we need to reload vehicles - either no vehicles or missing the trip's vehicle
+    const needsReload = vehicles.length === 0 || 
+                        (tripTicket.vehicle_id && !vehicles.find(v => v.id === tripTicket.vehicle_id));
+    
+    if (needsReload) {
+      const reason = vehicles.length === 0 ? 'No vehicles in state' : `Vehicle ${tripTicket.vehicle_id} not found in current list`;
+      console.log(`⚠️ ${reason}, reloading fresh data...`);
+      try {
+        // Fetch ALL vehicles (not just driver's vehicles) since trips can be assigned any vehicle
+        const freshVehicles = await ApiService.getDriverVehicles();
+        
+        console.log('🔍 Fresh vehicles loaded:', freshVehicles.map((v: any) => ({ id: v.id, plate: v.plate_number })));
+        
+        // Update state and local variable with fresh data
+        setVehicles(freshVehicles);
+        currentVehicles = freshVehicles;
+        
+        // Check again after fresh load
+        if (freshVehicles.length === 0) {
+          Alert.alert(
+            'No Vehicle',
+            'No vehicles available in the system. Please contact your administrator.',
+            [{ text: 'OK' }]
+          );
+          return;
+        }
+        
+        console.log('✅ Fresh vehicle data loaded:', freshVehicles.length, 'vehicle(s)');
+      } catch (error) {
+        console.error('Failed to reload vehicles:', error);
+        Alert.alert('Error', 'Failed to load vehicle data. Please try again.');
+        return;
+      }
+    }
+
     setSelectedTripTicket(tripTicket);
     setShowTripLogModal(true);
+    
+    console.log('🎫 Opening trip log for ticket:', {
+      ticket_number: tripTicket.ticket_number,
+      ticket_vehicle_id: tripTicket.vehicle_id,
+      available_vehicles: currentVehicles.map((v: any) => ({
+        id: v.id,
+        plate: v.plate_number,
+        model: v.model,
+        fuel: v.current_fuel_level
+      }))
+    });
     
     // Pre-fill form with trip ticket data
     const destination = tripTicket.travelRequest?.destinations && 
@@ -1214,10 +1485,34 @@ export default function TripsScreen() {
         ? tripTicket.travelRequest.destinations.join(', ')
         : tripTicket.travelRequest.destinations) || 
       `Trip Ticket #${tripTicket.ticket_number}`;
+    
+    // Get the specific vehicle assigned to this trip ticket - USE CURRENT VEHICLES
+    const assignedVehicleId = tripTicket.vehicle_id || (currentVehicles.length > 0 ? currentVehicles[0].id : 0);
+    const assignedVehicle = currentVehicles.find((v: any) => v.id === assignedVehicleId);
+    
+    if (!assignedVehicle && tripTicket.vehicle_id) {
+      console.error('❌ Vehicle not found!', {
+        looking_for: tripTicket.vehicle_id,
+        available_vehicles: currentVehicles.map((v: any) => v.id)
+      });
+    }
+    
+    const vehicleFuelLevel = assignedVehicle?.current_fuel_level !== null && assignedVehicle?.current_fuel_level !== undefined
+      ? parseFloat(assignedVehicle.current_fuel_level.toString())
+      : 0; // Use 0 if vehicle not found or has no fuel data
+    
+    console.log('🚗 Trip ticket vehicle assignment:', {
+      ticket_number: tripTicket.ticket_number,
+      assigned_vehicle_id: assignedVehicleId,
+      vehicle_plate: assignedVehicle?.plate_number || 'NOT FOUND',
+      vehicle_model: assignedVehicle?.model || 'NOT FOUND',
+      vehicle_fuel_level: vehicleFuelLevel,
+      using_fallback: !assignedVehicle,
+    });
       
     const initialForm = {
       trip_ticket_id: tripTicket.id,
-      vehicle_id: vehicles.length > 0 ? vehicles[0].id : 0,
+      vehicle_id: assignedVehicleId,
       date: new Date().toISOString().split('T')[0],
       departure_time_office: '',
       arrival_time_destination: '',
@@ -1226,12 +1521,12 @@ export default function TripsScreen() {
       destination: destination,
       purpose: tripTicket.travelRequest?.purpose || `Trip for ticket #${tripTicket.ticket_number}`,
       distance: 0,
-      fuel_balance_start: totalFuelBalance, // Set from fuel records
+      fuel_balance_start: vehicleFuelLevel, // Set from assigned vehicle's fuel level
       fuel_issued_office: 0,
       fuel_purchased_trip: 0,
-      fuel_total: totalFuelBalance, // Initialize with current balance
+      fuel_total: vehicleFuelLevel, // Initialize with vehicle's current fuel level
       fuel_used: 0,
-      fuel_balance_end: totalFuelBalance, // Initialize with current balance
+      fuel_balance_end: vehicleFuelLevel, // Initialize with vehicle's current fuel level
       gear_oil: 0,
       lubrication_oil: 0,
       brake_fluid: 0,
@@ -1251,15 +1546,23 @@ export default function TripsScreen() {
       if (savedData) {
         const parsedData = JSON.parse(savedData);
         console.log('📂 Loading saved trip log data for trip ticket:', tripTicket.id);
+        console.log('💾 Saved fuel data:', {
+          saved_fuel_balance_start: parsedData.fuel_balance_start,
+          current_vehicle_fuel: vehicleFuelLevel,
+        });
+        
         // Merge saved data with initial form, preserving saved values
         setTripLogForm({
           ...initialForm,
           ...parsedData,
-          // Always keep trip_ticket_id and vehicle_id from initial form
+          // Always keep trip_ticket_id and vehicle_id from trip ticket
           trip_ticket_id: tripTicket.id,
           vehicle_id: parsedData.vehicle_id || initialForm.vehicle_id,
-          // Update fuel balance from current fuel records
-          fuel_balance_start: totalFuelBalance,
+          // ALWAYS use current vehicle's fuel level (don't trust saved value)
+          fuel_balance_start: vehicleFuelLevel,
+          // Recalculate totals with current fuel level
+          fuel_total: vehicleFuelLevel + (parsedData.fuel_issued_office || 0) + (parsedData.fuel_purchased_trip || 0),
+          fuel_balance_end: Math.max(0, vehicleFuelLevel + (parsedData.fuel_issued_office || 0) + (parsedData.fuel_purchased_trip || 0) - (parsedData.fuel_used || 0)),
         });
       } else {
         console.log('📄 No saved data found, using initial form');
@@ -1319,10 +1622,6 @@ export default function TripsScreen() {
     }
     if (!tripLogForm.arrival_time_destination) {
       Alert.alert('Validation Error', 'Arrival at Destination time is required.');
-      return;
-    }
-    if (!tripLogForm.fuel_issued_office || tripLogForm.fuel_issued_office === 0) {
-      Alert.alert('Validation Error', 'Fuel Issued at Office is required.');
       return;
     }
     if (!tripLogForm.fuel_used || tripLogForm.fuel_used === 0) {
@@ -1403,11 +1702,24 @@ export default function TripsScreen() {
                     notes: tripLogForm.notes || '',
                   };
 
-                  await ApiService.createTripLog(tripData);
+                  try {
+                    await ApiService.createTripLog(tripData);
+                    console.log('✅ Trip log created successfully');
+                  } catch (createError: any) {
+                    if (createError.response?.status === 409 && createError.response?.data?.trip_log) {
+                      // Trip log already exists, update it instead
+                      const existingLog = createError.response.data.trip_log;
+                      console.log('⚠️ Trip log exists, updating ID:', existingLog.id);
+                      await ApiService.updateTripLog(existingLog.id, tripData);
+                      console.log('✅ Trip log updated successfully');
+                    } else {
+                      throw createError;
+                    }
+                  }
 
                   showSuccess({
-                    title: 'Trip Log Created',
-                    message: 'Your trip log has been successfully recorded.',
+                    title: 'Trip Log Saved',
+                    message: 'Your trip log has been successfully saved.',
                     autoClose: true,
                     autoCloseDelay: 3000,
                   });
@@ -1415,8 +1727,8 @@ export default function TripsScreen() {
                   closeTripLogModal();
                   loadTrips();
                 } catch (error: any) {
-                  console.error('Failed to create trip log:', error);
-                  Alert.alert('Error', error.response?.data?.message || 'Failed to create trip log');
+                  console.error('Failed to save trip log:', error);
+                  Alert.alert('Error', error.response?.data?.message || 'Failed to save trip log');
                 }
               }
             }
@@ -1436,7 +1748,7 @@ export default function TripsScreen() {
       
       const tripData = {
         trip_ticket_id: selectedTripTicket.id,
-        vehicle_id: tripLogForm.vehicle_id || undefined,
+        vehicle_id: tripLogForm.vehicle_id,
         date: tripLogForm.date,
         // Backend expects 24-hour format
         departure_time: departure24,
@@ -1467,11 +1779,24 @@ export default function TripsScreen() {
         notes: tripLogForm.notes || '',
       };
 
-      await ApiService.createTripLog(tripData);
+      try {
+        await ApiService.createTripLog(tripData);
+        console.log('✅ Trip log created successfully');
+      } catch (createError: any) {
+        if (createError.response?.status === 409 && createError.response?.data?.trip_log) {
+          // Trip log already exists, update it instead
+          const existingLog = createError.response.data.trip_log;
+          console.log('⚠️ Trip log exists, updating ID:', existingLog.id);
+          await ApiService.updateTripLog(existingLog.id, tripData);
+          console.log('✅ Trip log updated successfully');
+        } else {
+          throw createError;
+        }
+      }
 
       showSuccess({
-        title: 'Trip Log Created',
-        message: 'Your trip log has been successfully recorded.',
+        title: 'Trip Log Saved',
+        message: 'Your trip log has been successfully saved.',
         autoClose: true,
         autoCloseDelay: 3000,
       });
@@ -1481,8 +1806,8 @@ export default function TripsScreen() {
       // closeTripLogModal();
       loadTrips();
     } catch (error: any) {
-      console.error('Failed to create trip log:', error);
-      Alert.alert('Error', error.response?.data?.message || 'Failed to create trip log');
+      console.error('Failed to save trip log:', error);
+      Alert.alert('Error', error.response?.data?.message || 'Failed to save trip log');
     }
   };
 
@@ -1560,26 +1885,56 @@ export default function TripsScreen() {
         const purchased = Number(updated.fuel_purchased_trip || 0);
         const total = balance + issued + purchased;
         updated.fuel_total = total;
+        
+        // Also recalculate fuel_balance_end when fuel_total changes
+        const used = Number(updated.fuel_used || 0);
+        const endBalance = total - used;
+        updated.fuel_balance_end = endBalance >= 0 ? endBalance : 0;
       }
 
-      // Auto-calculate fuel balance end
-      if (['fuel_total', 'fuel_used'].includes(field)) {
+      // Auto-calculate fuel balance end when fuel_used changes
+      if (field === 'fuel_used') {
         const total = Number(updated.fuel_total || 0);
         const used = Number(updated.fuel_used || 0);
         const endBalance = total - used;
         updated.fuel_balance_end = endBalance >= 0 ? endBalance : 0;
       }
 
-      // Auto-calculate speedometer distance
-      if (['speedometer_start', 'speedometer_end'].includes(field)) {
+      // Auto-calculate speedometer distance and fuel used based on odometer
+      if (['speedometer_start', 'speedometer_end', 'odometer_start', 'odometer_end'].includes(field)) {
+        // If odometer is being updated, sync it to speedometer
+        if (field === 'odometer_start') {
+          updated.speedometer_start = Number(value);
+        } else if (field === 'odometer_end') {
+          updated.speedometer_end = Number(value);
+        }
+        
         const start = Number(updated.speedometer_start || 0);
         const end = Number(updated.speedometer_end || 0);
         const distance = end - start;
         updated.speedometer_distance = distance > 0 ? distance : 0;
         
-        // If no manual distance entered, use speedometer distance
-        if (!updated.distance || updated.distance === 0) {
-          updated.distance = distance > 0 ? distance : 0;
+        // Always update distance field with speedometer distance
+        updated.distance = distance > 0 ? distance : 0;
+        
+        // Auto-calculate fuel used based on odometer distance
+        // Using average fuel consumption rate: 1 liter per 10 km (10 km/L)
+        const odometerStart = Number(updated.odometer_start || 0);
+        const odometerEnd = Number(updated.odometer_end || 0);
+        const odometerDistance = odometerEnd - odometerStart;
+        
+        if (odometerDistance > 0) {
+          // Average fuel consumption: 10 km per liter (adjust based on vehicle type)
+          const AVG_FUEL_EFFICIENCY = 10; // km per liter
+          const calculatedFuelUsed = odometerDistance / AVG_FUEL_EFFICIENCY;
+          updated.fuel_used = parseFloat(calculatedFuelUsed.toFixed(2));
+          
+          console.log(`⛽ Auto-calculated from odometer: Distance=${odometerDistance} km, Fuel=${updated.fuel_used} L (${AVG_FUEL_EFFICIENCY} km/L)`);
+          
+          // Recalculate fuel_balance_end with new fuel_used
+          const total = Number(updated.fuel_total || 0);
+          const endBalance = total - updated.fuel_used;
+          updated.fuel_balance_end = endBalance >= 0 ? endBalance : 0;
         }
       }
 
@@ -1839,6 +2194,27 @@ export default function TripsScreen() {
                     toolbarEnabled={false}
                     loadingEnabled={true}
                   >
+                    {/* GPS Trail Route Polyline */}
+                    {routeCoordinates.length > 1 && (
+                      <Polyline
+                        coordinates={routeCoordinates}
+                        strokeColor="#3E0703"
+                        strokeWidth={4}
+                        lineJoin="round"
+                        lineCap="round"
+                      />
+                    )}
+
+                    {/* Starting point marker */}
+                    {routeCoordinates.length > 0 && (
+                      <Marker
+                        coordinate={routeCoordinates[0]}
+                        title="Start Point"
+                        pinColor="#10b981"
+                      />
+                    )}
+
+                    {/* Current location marker */}
                     {currentLocation && (
                       <Marker
                         coordinate={{
@@ -1884,6 +2260,14 @@ export default function TripsScreen() {
                       ±{Math.round(currentLocation.accuracy || 0)}m accuracy
                     </Text>
                   </View>
+                  {routeCoordinates.length > 1 && (
+                    <View style={styles.locationRow}>
+                      <Icon name="trail-sign" size={16} color="#3E0703" />
+                      <Text style={styles.routeDistance}>
+                        Distance traveled: {calculateTotalDistance().toFixed(2)} km ({routeCoordinates.length} points)
+                      </Text>
+                    </View>
+                  )}
                   {lastUpdate && (
                     <View style={styles.locationRow}>
                       <Icon name="time" size={16} color="#666" />
@@ -1897,6 +2281,21 @@ export default function TripsScreen() {
                   )}
                 </Animated.View>
               </View>
+            )}
+
+            {/* POS Receipt Upload - Only show if POS was generated */}
+            {activeTrip.pos_generated_at && (
+              <POSReceiptUpload
+                ticketId={activeTrip.id}
+                ticketNumber={activeTrip.ticket_number}
+                existingReceiptUrl={activeTrip.pos_receipt_image}
+                existingUploadedAt={activeTrip.pos_receipt_uploaded_at}
+                onUploadSuccess={(receiptUrl, uploadedAt) => {
+                  console.log('✅ POS Receipt uploaded successfully:', { receiptUrl, uploadedAt });
+                  // Refresh active trip data to update UI
+                  loadActiveTrip();
+                }}
+              />
             )}
 
             <View style={styles.activeTripActions}>
@@ -2144,7 +2543,7 @@ export default function TripsScreen() {
                       <View style={styles.ticketDetailItem}>
                         <Text style={styles.ticketDetailLabel}>Travel Date:</Text>
                         <Text style={styles.ticketDetailValue}>
-                          {selectedTripTicket.travelRequest?.start_date || 'N/A'}
+                          {formatDate(selectedTripTicket.travelRequest?.start_date ?? 'N/A')}
                         </Text>
                       </View>
                       
@@ -2282,6 +2681,17 @@ export default function TripsScreen() {
               <View style={styles.section}>
                 <Text style={styles.sectionTitle}>Fuel Information</Text>
                 
+                {/* Information banner explaining official fuel tracking */}
+                <View style={styles.fuelInfoBanner}>
+                  <Icon name="information-circle" size={20} color="#3b82f6" />
+                  <View style={styles.fuelInfoBannerText}>
+                    <Text style={styles.fuelInfoBannerTitle}>Trip Fuel Tracking</Text>
+                    <Text style={styles.fuelInfoBannerDescription}>
+                      The tank balance is auto-filled from vehicle. Enter office fuel only if issued for this trip (0 if using existing fuel).
+                    </Text>
+                  </View>
+                </View>
+                
                 {/* Balance of fuel in tank - Full Width with Info */}
                 <View style={styles.inputGroup}>
                   <Text style={styles.label}>Balance of fuel in tank (Liters)</Text>
@@ -2300,31 +2710,65 @@ export default function TripsScreen() {
                   </View>
                 </View>
                 
-                <View style={styles.row}>
-                  <View style={[styles.inputGroup, styles.halfWidth]}>
-                    <Text style={styles.label}>Fuel Issued at Office (L) *</Text>
-                    <TextInput
-                      style={styles.input}
-                      value={tripLogForm.fuel_issued_office?.toString() || ''}
-                      onChangeText={(text) => updateTripLogForm('fuel_issued_office', parseFloat(text) || 0)}
-                      placeholder="0"
-                      keyboardType="numeric"
-                    />
-                  </View>
-
-                  <View style={[styles.inputGroup, styles.halfWidth]}>
-                    <Text style={styles.label}>Fuel Purchased on Trip (L)</Text>
-                    <TextInput
-                      style={styles.input}
-                      value={tripLogForm.fuel_purchased_trip?.toString() || ''}
-                      onChangeText={(text) => updateTripLogForm('fuel_purchased_trip', parseFloat(text) || 0)}
-                      placeholder="0"
-                      keyboardType="numeric"
-                    />
+                {/* Fuel Issued at Office - Full Width */}
+                <View style={styles.inputGroup}>
+                  <Text style={styles.label}>Fuel Issued at Office (L)</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={fuelIssuedText || tripLogForm.fuel_issued_office?.toString() || ''}
+                    onChangeText={(text) => {
+                      // Allow empty, numbers, and decimal point
+                      if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                        setFuelIssuedText(text);
+                        updateTripLogForm('fuel_issued_office', text === '' ? 0 : parseFloat(text) || 0);
+                      }
+                    }}
+                    onBlur={() => {
+                      // Clean up text state on blur
+                      if (fuelIssuedText && !fuelIssuedText.endsWith('.')) {
+                        setFuelIssuedText('');
+                      }
+                    }}
+                    placeholder="0"
+                    keyboardType="decimal-pad"
+                  />
+                  <View style={styles.helperTextContainer}>
+                    <Icon name="information-circle-outline" size={14} color="#3b82f6" />
+                    <Text style={styles.helperText}>
+                      Enter 0 if using existing fuel, or amount if office issued fuel
+                    </Text>
                   </View>
                 </View>
 
+                {/* Fuel Purchased and Fuel Total Row */}
                 <View style={styles.row}>
+                  <View style={[styles.inputGroup, styles.halfWidth]}>
+                    <Text style={[styles.label, { fontSize: 12 }]}>Fuel Purchased on Trip (L)</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={fuelPurchasedText || tripLogForm.fuel_purchased_trip?.toString() || ''}
+                      onChangeText={(text) => {
+                        // Allow empty, numbers, and decimal point
+                        if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                          setFuelPurchasedText(text);
+                          updateTripLogForm('fuel_purchased_trip', text === '' ? 0 : parseFloat(text) || 0);
+                        }
+                      }}
+                      onBlur={() => {
+                        // Clean up text state on blur
+                        if (fuelPurchasedText && !fuelPurchasedText.endsWith('.')) {
+                          setFuelPurchasedText('');
+                        }
+                      }}
+                      placeholder="0"
+                      keyboardType="decimal-pad"
+                    />
+                    <View style={styles.helperTextContainer}>
+                      <Icon name="add-circle-outline" size={14} color="#10b981" />
+                      <Text style={[styles.helperText, { color: '#10b981' }]}>Added to fuel balance</Text>
+                    </View>
+                  </View>
+
                   <View style={[styles.inputGroup, styles.halfWidth]}>
                     <Text style={styles.label}>Fuel Total (L)</Text>
                     <TextInput
@@ -2335,20 +2779,37 @@ export default function TripsScreen() {
                       keyboardType="numeric"
                     />
                   </View>
+                </View>
 
+                {/* Fuel Used and Fuel Balance End Row */}
+                <View style={styles.row}>
                   <View style={[styles.inputGroup, styles.halfWidth]}>
                     <Text style={styles.label}>Fuel Used (L) *</Text>
                     <TextInput
                       style={styles.input}
-                      value={tripLogForm.fuel_used?.toString() || ''}
-                      onChangeText={(text) => updateTripLogForm('fuel_used', parseFloat(text) || 0)}
+                      value={fuelUsedText || tripLogForm.fuel_used?.toString() || ''}
+                      onChangeText={(text) => {
+                        // Allow empty, numbers, and decimal point
+                        if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                          setFuelUsedText(text);
+                          updateTripLogForm('fuel_used', text === '' ? 0 : parseFloat(text) || 0);
+                        }
+                      }}
+                      onBlur={() => {
+                        // Clean up text state on blur
+                        if (fuelUsedText && !fuelUsedText.endsWith('.')) {
+                          setFuelUsedText('');
+                        }
+                      }}
                       placeholder="0"
-                      keyboardType="numeric"
+                      keyboardType="decimal-pad"
                     />
+                    <View style={styles.helperTextContainer}>
+                      <Icon name="remove-circle-outline" size={14} color="#ef4444" />
+                      <Text style={[styles.helperText, { color: '#ef4444' }]}>Deducted from fuel balance</Text>
+                    </View>
                   </View>
-                </View>
 
-                <View style={styles.row}>
                   <View style={[styles.inputGroup, styles.halfWidth]}>
                     <Text style={styles.label}>Fuel Balance End (L)</Text>
                     <TextInput
@@ -2358,10 +2819,6 @@ export default function TripsScreen() {
                       placeholder="0.00"
                       keyboardType="numeric"
                     />
-                  </View>
-
-                  <View style={[styles.inputGroup, styles.halfWidth]}>
-                    {/* Empty space for alignment */}
                   </View>
                 </View>
               </View>
@@ -2407,7 +2864,7 @@ export default function TripsScreen() {
                   </View>
 
                   <View style={[styles.inputGroup, styles.halfWidth]}>
-                    <Text style={styles.label}>Grease (L)</Text>
+                    <Text style={styles.label}>Grease (kg)</Text>
                     <TextInput
                       style={styles.input}
                       value={tripLogForm.grease?.toString() || ''}
@@ -2425,7 +2882,7 @@ export default function TripsScreen() {
                 
                 <View style={styles.row}>
                   <View style={[styles.inputGroup, styles.halfWidth]}>
-                    <Text style={styles.label}>Speedometer Start (km)</Text>
+                    <Text style={[styles.label, { fontSize: 12 }]}>Speedometer Start (km)</Text>
                     <TextInput
                       style={styles.input}
                       value={tripLogForm.speedometer_start?.toString() || ''}
@@ -2449,7 +2906,7 @@ export default function TripsScreen() {
 
                 <View style={styles.row}>
                   <View style={[styles.inputGroup, styles.halfWidth]}>
-                    <Text style={styles.label}>Speedometer Distance (km)</Text>
+                    <Text style={[styles.label, { fontSize: 12 }]}>Speedometer Distance (km)</Text>
                     <TextInput
                       style={[styles.input, styles.readOnly]}
                       value={tripLogForm.speedometer_distance?.toString() || '0'}
@@ -3094,15 +3551,11 @@ const styles = StyleSheet.create({
   // Modal Styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'flex-end',
+    backgroundColor: '#fff',
   },
   modalContent: {
+    flex: 1,
     backgroundColor: '#fff',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    maxHeight: '90%',
-    minHeight: '70%',
   },
   modalHeader: {
     flexDirection: 'row',
@@ -3204,7 +3657,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   section: {
-    marginBottom: 30,
+    marginBottom: 24,
     backgroundColor: '#fff',
     borderRadius: 8,
     padding: 16,
@@ -3221,17 +3674,19 @@ const styles = StyleSheet.create({
     paddingBottom: 8,
   },
   inputGroup: {
-    marginBottom: 20,
+    marginBottom: 16,
   },
   row: {
     flexDirection: 'row',
     gap: 12,
+    marginBottom: 0,
   },
   halfWidth: {
     flex: 1,
+    minWidth: 0,
   },
   label: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '600',
     color: '#34495e',
     marginBottom: 8,
@@ -3240,10 +3695,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#bdc3c7',
     borderRadius: 8,
-    paddingHorizontal: 16,
+    paddingHorizontal: 14,
     paddingVertical: 12,
-    fontSize: 16,
+    fontSize: 15,
     backgroundColor: '#fff',
+    minHeight: 44,
   },
   readOnly: {
     backgroundColor: '#F0F2F5',
@@ -3253,6 +3709,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginTop: 6,
+    marginBottom: -8,
     paddingHorizontal: 4,
   },
   helperText: {
@@ -3260,6 +3717,31 @@ const styles = StyleSheet.create({
     color: '#65676B',
     marginLeft: 4,
     fontStyle: 'italic',
+  },
+  fuelInfoBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#eff6ff',
+    borderWidth: 1,
+    borderColor: '#3b82f6',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+    gap: 10,
+  },
+  fuelInfoBannerText: {
+    flex: 1,
+  },
+  fuelInfoBannerTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#1e40af',
+    marginBottom: 4,
+  },
+  fuelInfoBannerDescription: {
+    fontSize: 12,
+    color: '#1e40af',
+    lineHeight: 18,
   },
   textArea: {
     height: 80,
@@ -3456,6 +3938,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#65676B',
     marginLeft: 8,
+  },
+  routeDistance: {
+    fontSize: 12,
+    color: '#3E0703',
+    marginLeft: 8,
+    fontWeight: '600',
   },
   lastUpdate: {
     fontSize: 12,

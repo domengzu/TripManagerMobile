@@ -204,7 +204,7 @@ export default function LoginScreen() {
             </View>
             <View style={styles.infoItem}>
               <Icon name="people" size={16} color="#C28F22" />
-              <Text style={styles.infoText}>For drivers and directors</Text>
+              <Text style={styles.infoText}>For driver use</Text>
             </View>            
           </View>
 

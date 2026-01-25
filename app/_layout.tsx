@@ -224,6 +224,9 @@ function RootLayoutNav() {
         <Stack.Screen name="trip-log-history" options={{ headerShown: false }} />
         <Stack.Screen name="vehicle-form" options={{ headerShown: false }} />
         <Stack.Screen name="trip-log-form" options={{ headerShown: false }} />
+        <Stack.Screen name="fuel-status" options={{ headerShown: false }} />
+        <Stack.Screen name="refuel-form" options={{ headerShown: false }} />
+        <Stack.Screen name="fuel-history" options={{ headerShown: false }} />
       </Stack>
       <StatusBar style="auto" />
     </ThemeProvider>

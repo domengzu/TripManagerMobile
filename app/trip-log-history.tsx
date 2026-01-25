@@ -15,13 +15,15 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import Icon from 'react-native-vector-icons/Ionicons';
+import { Paths, File } from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
 import ApiService from '@/services/api';
 import { TripTicket } from '@/types';
 import { LoadingComponent } from '@/components/LoadingComponent';
 
 type DateFilter = 'all' | 'this_year' | 'this_month' | 'last_30_days';
 
-export default function TripLogHistoryScreen() {
+export default function TripLogHistory() {
   const [completedTrips, setCompletedTrips] = useState<TripTicket[]>([]);
   const [filteredTrips, setFilteredTrips] = useState<TripTicket[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -196,40 +198,48 @@ export default function TripLogHistoryScreen() {
     try {
       setDownloadingId(tripTicket.id);
 
-      // Call API to generate PDF
+      // Call API to generate PDF (this may take a moment)
       const response = await ApiService.downloadTripLogPDF(tripTicket.id);
 
-      if (!response.pdf_url) {
-        throw new Error('PDF URL not provided by server');
+      if (!response.pdf_base64) {
+        throw new Error('PDF data not provided by server');
       }
 
-      // Open PDF in browser/viewer
-      const supported = await Linking.canOpenURL(response.pdf_url);
+      // Create filename
+      const filename = response.filename || `trip_log_${tripTicket.ticket_number}_${Date.now()}.pdf`;
       
-      if (supported) {
-        await Linking.openURL(response.pdf_url);
-        Alert.alert(
-          'PDF Ready',
-          'Your trip log PDF has been opened. You can download or share it from there.',
-          [{ text: 'OK', style: 'default' }]
-        );
-      } else {
-        Alert.alert(
-          'PDF Generated',
-          `PDF URL: ${response.pdf_url}\n\nCopy this URL to download the PDF.`,
-          [
-            { 
-              text: 'OK', 
-              style: 'default' 
-            }
-          ]
-        );
-      }
+      // Create file in cache directory using expo-file-system v19 API
+      const file = new File(Paths.cache, filename);
+      
+      // Write base64 PDF to file
+      await file.write(response.pdf_base64, { encoding: 'base64' });
+
+      console.log('PDF saved to:', file.uri);
+
+      // Share the PDF - on Android, user can select PDF viewer or save to Downloads
+      // on iOS, user can select "Open in..." to view in PDF reader
+      // Clear loading state before opening sharing dialog
+      setDownloadingId(null);
+      
+      await Sharing.shareAsync(file.uri, {
+        mimeType: 'application/pdf',
+        dialogTitle: 'View or Save Trip Log PDF',
+        UTI: 'com.adobe.pdf',
+      });
     } catch (error: any) {
       console.error('Failed to download trip log PDF:', error);
-      const errorMessage = error.response?.data?.message || error.message || 'Failed to generate trip log PDF';
-      Alert.alert('Download Error', errorMessage);
-    } finally {
+      console.error('Error response:', error.response?.data);
+      console.error('Error status:', error.response?.status);
+      
+      const errorMessage = error.response?.data?.message 
+        || error.response?.data?.error 
+        || error.message 
+        || 'Failed to generate trip log PDF';
+      
+      const errorDetails = error.response?.data?.error || '';
+      const fullMessage = errorDetails ? `${errorMessage}\n\nDetails: ${errorDetails}` : errorMessage;
+      
+      Alert.alert('Download Error', fullMessage);
       setDownloadingId(null);
     }
   };
@@ -356,12 +366,12 @@ export default function TripLogHistoryScreen() {
           <Text style={styles.detailValue}>{formatDateTime(trip.completed_at)}</Text>
         </View>
 
-        {trip.end_mileage && (
+        {trip.end_mileage != null && (
           <View style={styles.detailRow}>
             <Icon name="speedometer-outline" size={16} color="#6b7280" />
             <Text style={styles.detailLabel}>Distance:</Text>
             <Text style={styles.detailValue}>
-              {trip.end_mileage.toFixed(1)} km
+              {Number(trip.end_mileage).toFixed(1)} km
             </Text>
           </View>
         )}
@@ -510,6 +520,23 @@ export default function TripLogHistoryScreen() {
           showsVerticalScrollIndicator={false}
         />
       )}
+
+      {/* PDF Loading Modal */}
+      <Modal
+        visible={downloadingId !== null}
+        transparent={true}
+        animationType="fade"
+      >
+        <View style={styles.loadingModalOverlay}>
+          <View style={styles.loadingModalContent}>
+            <ActivityIndicator size="large" color="#3E0703" />
+            <Text style={styles.loadingModalTitle}>Generating PDF...</Text>
+            <Text style={styles.loadingModalMessage}>
+              This may take a moment. Please wait while we prepare your trip log.
+            </Text>
+          </View>
+        </View>
+      </Modal>
 
       {/* Date Filter Modal */}
       <Modal
@@ -686,6 +713,41 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: '#3E0703',
+  },
+
+  // Loading Modal Styles
+  loadingModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  loadingModalContent: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+    minWidth: 280,
+    maxWidth: '90%',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  loadingModalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#3E0703',
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  loadingModalMessage: {
+    fontSize: 14,
+    color: '#6b7280',
+    textAlign: 'center',
+    lineHeight: 20,
   },
 
   // Modal Styles

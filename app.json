@@ -1,0 +1,108 @@
+{
+  "expo": {
+    "name": "TripManager",
+    "slug": "capstonetripmanager",
+    "version": "1.1.2",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "tripmanager",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/images/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "newArchEnabled": true,
+    "extra": {
+      "eas": {
+        "projectId": "e1b00319-5b81-40c9-8d01-065a0313572d"
+      }
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tripmanager.app",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "remote-notification",
+          "location"
+        ],
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "TripManager needs access to your location even when the app is closed to track your trip and ensure passenger safety.",
+        "NSLocationWhenInUseUsageDescription": "TripManager needs access to your location to track your trip route."
+      },
+      "config": {
+        "googleMapsApiKey": "AIzaSyCbMzQa5y-_no0t2_7Lea8AzeAC5wpFKUk"
+      }
+    },
+    "android": {
+      "icon": "./assets/images/icon.png",
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff",
+        "foregroundImage": "./assets/images/icon.png"
+      },
+      "edgeToEdgeEnabled": false,
+      "predictiveBackGestureEnabled": false,
+      "package": "com.tripmanager.app",
+      "permissions": [
+        "NOTIFICATIONS",
+        "POST_NOTIFICATIONS",
+        "RECEIVE_BOOT_COMPLETED",
+        "VIBRATE",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION"
+      ],
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyCbMzQa5y-_no0t2_7Lea8AzeAC5wpFKUk"
+        }
+      },
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "tripmanager",
+              "host": "*"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        }
+      ]
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/notification-icon.png",
+          "color": "#3E0703",
+          "defaultChannel": "default"
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/icon.png",
+          "imageWidth": 250,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "owner": "domen.100403"
+  }
+}

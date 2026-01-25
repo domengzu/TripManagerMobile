@@ -6,6 +6,7 @@ export interface User {
   profile_picture?: string;
   department?: string;
   license_number?: string;
+  license_type?: string; // Philippine DL codes: A, A1, B, B1, B2, C, D, BE, CE
   role: 'driver' | 'regular' | 'director' | 'assistant' | 'procurement' | 'admin';
   can_approve_travel: boolean;
   is_active: boolean;
@@ -53,6 +54,24 @@ export interface Vehicle {
   status: 'Available' | 'In Use' | 'Maintenance' | 'Out of Service';
   created_at: string;
   updated_at: string;
+  // Fuel tank tracking
+  fuel_tank_capacity?: number; // in liters
+  current_fuel_level?: number; // in liters
+  last_refuel_date?: string;
+  last_refuel_location?: string;
+}
+
+// Fuel Tracking Types
+export interface VehicleFuelStatus {
+  vehicle_id: number;
+  vehicle: Vehicle;
+  current_fuel_level: number; // liters
+  fuel_tank_capacity: number; // liters
+  fuel_percentage: number; // 0-100
+  last_refuel_date?: string;
+  last_refuel_location?: string;
+  last_refuel_amount?: number;
+  estimated_range_km?: number;
 }
 
 export interface VehicleFormData {
@@ -130,6 +149,55 @@ export interface TripStats {
   total_fuel: number;
 }
 
+// Refuel Record Types
+export interface RefuelRecord {
+  id: number;
+  vehicle_id: number;
+  driver_id: number;
+  trip_ticket_id?: number;
+  pos_control_number?: string;
+  liters_added: number;
+  cost?: number;
+  fuel_type?: string;
+  refuel_date: string;
+  location?: string;
+  odometer_reading?: number;
+  gas_station?: string;
+  receipt_photo?: string;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+  
+  // Relationships
+  vehicle?: Vehicle;
+  driver?: User;
+  tripTicket?: TripTicket;
+}
+
+export interface RefuelFormData {
+  vehicle_id: number;
+  trip_ticket_id?: number;
+  pos_control_number?: string;
+  liters_added: number;
+  cost?: number;
+  fuel_type?: string;
+  location?: string;
+  odometer_reading?: number;
+  gas_station?: string;
+  notes?: string;
+}
+
+export interface FuelHistoryItem {
+  id: number;
+  type: 'refuel' | 'consumption';
+  date: string;
+  amount: number; // liters (positive for refuel, negative for consumption)
+  location?: string;
+  trip_ticket_number?: string;
+  pos_control_number?: string;
+  notes?: string;
+}
+
 // Trip Ticket Types
 export interface TravelRequest {
   id: number;
@@ -172,6 +240,10 @@ export interface TripTicket {
   destination?: string;
   issued_by: number;
   issued_at: string;
+  pos_generated_at?: string;
+  pos_generated_by?: number;
+  pos_receipt_image?: string;
+  pos_receipt_uploaded_at?: string;
   started_at?: string;
   completed_at?: string;
   end_mileage?: number;
@@ -179,10 +251,6 @@ export interface TripTicket {
   completion_notes?: string;
   status: 'active' | 'ready_for_trip' | 'in_progress' | 'completed' | 'cancelled';
   notes?: string;
-  procurement_status: 'pending' | 'approved' | 'cancelled';
-  procurement_approved_by?: number;
-  procurement_approved_at?: string;
-  procurement_notes?: string;
   created_at: string;
   updated_at: string;
   
@@ -191,8 +259,6 @@ export interface TripTicket {
   driver?: User;
   vehicle?: Vehicle;
   issuedBy?: User;
-  procurementApprovedBy?: User;
-  procurementApprover?: User; // Alias for compatibility
 }
 
 // Dashboard Types
@@ -205,7 +271,6 @@ export interface DriverStats {
   total_tickets?: number;
   completed_tickets?: number;
   cancelled_tickets?: number;
-  pending_tickets?: number;
   // Director stats
   pending_requests?: number;
   approved_today?: number;

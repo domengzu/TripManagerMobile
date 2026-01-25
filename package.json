@@ -1,7 +1,7 @@
 {
   "name": "tripmanagermobilefinal",
   "main": "expo-router/entry",
-  "version": "1.0.0",
+  "version": "1.0.5",
   "scripts": {
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
@@ -29,6 +29,7 @@
     "expo-haptics": "~15.0.7",
     "expo-image": "~3.0.9",
     "expo-image-picker": "~17.0.8",
+    "expo-intent-launcher": "~13.0.7",
     "expo-linking": "~8.0.8",
     "expo-location": "^19.0.7",
     "expo-media-library": "~18.2.0",

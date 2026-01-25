@@ -108,7 +108,22 @@ export default function NotificationsScreen() {
 
     // Navigate to relevant screen if trip ticket ID exists
     if (notification.data?.trip_ticket_id) {
-      router.push(`/trip-ticket-details?id=${notification.data.trip_ticket_id}`);
+      // Check if it's a cancellation notification
+      const isCancellationNotif = notification.type === 'trip_ticket_cancelled' || 
+                                   notification.message?.toLowerCase().includes('cancelled') ||
+                                   notification.message?.toLowerCase().includes('undone');
+      
+      if (isCancellationNotif) {
+        // Don't navigate for cancelled tickets, just show alert
+        Alert.alert(
+          'Trip Cancelled',
+          'This trip ticket has been cancelled and is no longer available.',
+          [{ text: 'OK' }]
+        );
+      } else {
+        // Navigate to trip ticket details
+        router.push(`/trip-ticket-details?id=${notification.data.trip_ticket_id}`);
+      }
     }
   };
 
@@ -376,7 +391,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   refreshButton: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#3E0703',
     paddingHorizontal: 24,
     paddingVertical: 12,
     borderRadius: 8,

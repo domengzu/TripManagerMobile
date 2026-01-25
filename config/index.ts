@@ -4,7 +4,7 @@
 export const API_CONFIG = {
   // Update this URL to match your Laravel server
   // For local development:
-  // BASE_URL: 'http://192.168.1.5:8000/api', // Replace with your actual IP
+  // BASE_URL: 'http://192.168.1.6:8000/api', // Replace with your actual IP
   
   // Alternative URLs to try if the above doesn't work:
   // BASE_URL: 'http://localhost:8000/api', // If testing on same machine
@@ -136,7 +136,7 @@ export const DEV_CONFIG = {
 export const PUSH_CONFIG = {
   // Expo project ID from app.json
   // This is needed for push notifications to work
-  EXPO_PROJECT_ID: 'd5cff0c6-7645-48db-a57d-20f41ebd5b4c',
+  EXPO_PROJECT_ID: 'e1b00319-5b81-40c9-8d01-065a0313572d',
 };
 
 export default {

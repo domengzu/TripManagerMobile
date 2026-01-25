@@ -54,6 +54,11 @@ export default function TripLogFormScreen() {
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingData, setIsLoadingData] = useState(true);
 
+  // Text input states for decimal fields (to preserve decimal point while typing)
+  const [fuelIssuedText, setFuelIssuedText] = useState('');
+  const [fuelPurchasedText, setFuelPurchasedText] = useState('');
+  const [fuelUsedText, setFuelUsedText] = useState('');
+
   // Refs for auto-calculations
   const fuelInputsRef = useRef<TextInput[]>([]);
   const speedometerInputsRef = useRef<TextInput[]>([]);
@@ -219,9 +224,8 @@ export default function TripLogFormScreen() {
         newErrors.arrival_time_office = 'Arrival time at office is required';
       }
 
-      if (!formData.distance || formData.distance <= 0) {
-        newErrors.distance = 'Valid distance is required';
-      }
+      // Distance is optional for first-time logging
+      // Users can update it later when they have the information
 
       // Time validation
       if (formData.departure_time_office && formData.arrival_time_office) {
@@ -266,6 +270,21 @@ export default function TripLogFormScreen() {
       }
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Format date to readable format (e.g., "November 18, 2025")
+  const formatDate = (dateString?: string) => {
+    if (!dateString) return 'N/A';
+    try {
+      const date = new Date(dateString);
+      return date.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+      });
+    } catch {
+      return 'N/A';
     }
   };
 
@@ -366,7 +385,7 @@ export default function TripLogFormScreen() {
                   <View style={styles.ticketDetailItem}>
                     <Text style={styles.ticketDetailLabel}>Travel Date:</Text>
                     <Text style={styles.ticketDetailValue}>
-                      {tripTicket.travelRequest?.start_date || 'N/A'}
+                      {formatDate(tripTicket.travelRequest?.start_date)}
                     </Text>
                   </View>
                   
@@ -500,10 +519,22 @@ export default function TripLogFormScreen() {
                 <Text style={styles.label}>Fuel Issued at Office</Text>
                 <TextInput
                   style={styles.input}
-                  value={formData.fuel_issued_office?.toString() || '0'}
-                  onChangeText={(text) => updateFormData('fuel_issued_office', parseFloat(text) || 0)}
+                  value={fuelIssuedText || formData.fuel_issued_office?.toString() || ''}
+                  onChangeText={(text) => {
+                    // Allow empty, numbers, and decimal point
+                    if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                      setFuelIssuedText(text);
+                      updateFormData('fuel_issued_office', text === '' ? 0 : parseFloat(text) || 0);
+                    }
+                  }}
+                  onBlur={() => {
+                    // Clean up text state on blur
+                    if (fuelIssuedText && !fuelIssuedText.endsWith('.')) {
+                      setFuelIssuedText('');
+                    }
+                  }}
                   placeholder="0"
-                  keyboardType="numeric"
+                  keyboardType="decimal-pad"
                   editable={!isLoading}
                 />
               </View>
@@ -514,10 +545,22 @@ export default function TripLogFormScreen() {
                 <Text style={styles.label}>Fuel Purchased on Trip</Text>
                 <TextInput
                   style={styles.input}
-                  value={formData.fuel_purchased_trip?.toString() || '0'}
-                  onChangeText={(text) => updateFormData('fuel_purchased_trip', parseFloat(text) || 0)}
+                  value={fuelPurchasedText || formData.fuel_purchased_trip?.toString() || ''}
+                  onChangeText={(text) => {
+                    // Allow empty, numbers, and decimal point
+                    if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                      setFuelPurchasedText(text);
+                      updateFormData('fuel_purchased_trip', text === '' ? 0 : parseFloat(text) || 0);
+                    }
+                  }}
+                  onBlur={() => {
+                    // Clean up text state on blur
+                    if (fuelPurchasedText && !fuelPurchasedText.endsWith('.')) {
+                      setFuelPurchasedText('');
+                    }
+                  }}
                   placeholder="0"
-                  keyboardType="numeric"
+                  keyboardType="decimal-pad"
                   editable={!isLoading}
                 />
               </View>
@@ -537,10 +580,22 @@ export default function TripLogFormScreen() {
                 <Text style={styles.label}>Fuel Used</Text>
                 <TextInput
                   style={styles.input}
-                  value={formData.fuel_used?.toString() || '0'}
-                  onChangeText={(text) => updateFormData('fuel_used', parseFloat(text) || 0)}
+                  value={fuelUsedText || formData.fuel_used?.toString() || ''}
+                  onChangeText={(text) => {
+                    // Allow empty, numbers, and decimal point
+                    if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                      setFuelUsedText(text);
+                      updateFormData('fuel_used', text === '' ? 0 : parseFloat(text) || 0);
+                    }
+                  }}
+                  onBlur={() => {
+                    // Clean up text state on blur
+                    if (fuelUsedText && !fuelUsedText.endsWith('.')) {
+                      setFuelUsedText('');
+                    }
+                  }}
                   placeholder="0"
-                  keyboardType="numeric"
+                  keyboardType="decimal-pad"
                   editable={!isLoading}
                 />
               </View>
@@ -565,10 +620,15 @@ export default function TripLogFormScreen() {
                 <Text style={styles.label}>Gear Oil</Text>
                 <TextInput
                   style={styles.input}
-                  value={formData.gear_oil?.toString() || '0'}
-                  onChangeText={(text) => updateFormData('gear_oil', parseFloat(text) || 0)}
+                  value={formData.gear_oil?.toString() || ''}
+                  onChangeText={(text) => {
+                    // Allow empty, numbers, and decimal point
+                    if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                      updateFormData('gear_oil', text === '' ? 0 : parseFloat(text) || 0);
+                    }
+                  }}
                   placeholder="0"
-                  keyboardType="numeric"
+                  keyboardType="decimal-pad"
                   editable={!isLoading}
                 />
               </View>
@@ -577,10 +637,15 @@ export default function TripLogFormScreen() {
                 <Text style={styles.label}>Lubrication Oil</Text>
                 <TextInput
                   style={styles.input}
-                  value={formData.lubrication_oil?.toString() || '0'}
-                  onChangeText={(text) => updateFormData('lubrication_oil', parseFloat(text) || 0)}
+                  value={formData.lubrication_oil?.toString() || ''}
+                  onChangeText={(text) => {
+                    // Allow empty, numbers, and decimal point
+                    if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                      updateFormData('lubrication_oil', text === '' ? 0 : parseFloat(text) || 0);
+                    }
+                  }}
                   placeholder="0"
-                  keyboardType="numeric"
+                  keyboardType="decimal-pad"
                   editable={!isLoading}
                 />
               </View>
@@ -591,10 +656,15 @@ export default function TripLogFormScreen() {
                 <Text style={styles.label}>Brake Fluid</Text>
                 <TextInput
                   style={styles.input}
-                  value={formData.brake_fluid?.toString() || '0'}
-                  onChangeText={(text) => updateFormData('brake_fluid', parseFloat(text) || 0)}
+                  value={formData.brake_fluid?.toString() || ''}
+                  onChangeText={(text) => {
+                    // Allow empty, numbers, and decimal point
+                    if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                      updateFormData('brake_fluid', text === '' ? 0 : parseFloat(text) || 0);
+                    }
+                  }}
                   placeholder="0"
-                  keyboardType="numeric"
+                  keyboardType="decimal-pad"
                   editable={!isLoading}
                 />
               </View>
@@ -603,10 +673,15 @@ export default function TripLogFormScreen() {
                 <Text style={styles.label}>Grease</Text>
                 <TextInput
                   style={styles.input}
-                  value={formData.grease?.toString() || '0'}
-                  onChangeText={(text) => updateFormData('grease', parseFloat(text) || 0)}
+                  value={formData.grease?.toString() || ''}
+                  onChangeText={(text) => {
+                    // Allow empty, numbers, and decimal point
+                    if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                      updateFormData('grease', text === '' ? 0 : parseFloat(text) || 0);
+                    }
+                  }}
                   placeholder="0"
-                  keyboardType="numeric"
+                  keyboardType="decimal-pad"
                   editable={!isLoading}
                 />
               </View>
@@ -654,13 +729,18 @@ export default function TripLogFormScreen() {
               </View>
 
               <View style={[styles.inputGroup, styles.halfWidth]}>
-                <Text style={styles.label}>Distance (km) *</Text>
+                <Text style={styles.label}>Distance (km)</Text>
                 <TextInput
                   style={[styles.input, errors.distance && styles.inputError]}
                   value={formData.distance.toString()}
-                  onChangeText={(text) => updateFormData('distance', parseFloat(text) || 0)}
+                  onChangeText={(text) => {
+                    // Allow empty, numbers, and decimal point
+                    if (text === '' || /^\d*\.?\d*$/.test(text)) {
+                      updateFormData('distance', text === '' ? 0 : parseFloat(text) || 0);
+                    }
+                  }}
                   placeholder="0"
-                  keyboardType="numeric"
+                  keyboardType="decimal-pad"
                   editable={!isLoading}
                 />
                 {errors.distance && <Text style={styles.errorText}>{errors.distance}</Text>}

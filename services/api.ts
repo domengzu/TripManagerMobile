@@ -58,7 +58,8 @@ class ApiService {
         return response;
       },
       async (error) => {
-        if (DEV_CONFIG.LOG_API_CALLS) {
+        // Don't log 409 errors - they're handled as "update instead of create"
+        if (DEV_CONFIG.LOG_API_CALLS && error.response?.status !== 409) {
           console.error(`❌ API Error: ${error.response?.status || 'Network'} ${error.config?.url || 'Unknown URL'}`);
           console.error('Error Details:', error.response?.data || error.message);
           console.error('Full Error:', error);
@@ -331,14 +332,31 @@ class ApiService {
   }
 
   async updateTripLog(id: number, tripData: {
-    vehicle_id: number;
+    vehicle_id?: number;
+    trip_ticket_id?: number;
     date: string;
     departure_time_office: string;
-    arrival_time_office: string;
+    arrival_time_destination?: string;
+    departure_time_destination?: string;
+    arrival_time_office?: string;
     destination: string;
-    purpose: string;
     distance: number;
-    fuel_used: number;
+    fuel_balance_start?: number;
+    fuel_issued_office?: number;
+    fuel_purchased_trip?: number;
+    fuel_total?: number;
+    fuel_used?: number;
+    fuel_balance_end?: number;
+    speedometer_start?: number;
+    speedometer_end?: number;
+    speedometer_distance?: number;
+    odometer_start?: number;
+    odometer_end?: number;
+    gear_oil?: number;
+    lubrication_oil?: number;
+    brake_fluid?: number;
+    grease?: number;
+    purpose?: string;
     notes?: string;
   }) {
     const response = await this.client.put(`/driver/trip-logs/${id}`, tripData);
@@ -353,7 +371,6 @@ class ApiService {
   // Trip Tickets
   async getTripTickets(filters?: {
     status?: string;
-    procurement_status?: string;
     date_from?: string;
     date_to?: string;
     per_page?: number;
@@ -361,6 +378,14 @@ class ApiService {
   }) {
     const response = await this.client.get('/driver/trip-tickets', { params: filters });
     return response.data.data || response.data;
+  }
+
+  async getActiveTripTickets() {
+    const response = await this.client.get('/driver/trip-tickets', { 
+      params: { status: 'in_progress', with_relations: true } 
+    });
+    // Handle nested pagination structure
+    return response.data.trip_tickets?.data || response.data.data || [];
   }
 
   async getTripTicketsHistory(filters?: {
@@ -386,6 +411,7 @@ class ApiService {
   async startTrip(id: number, data?: {
     start_location?: string;
     start_coordinates?: string;
+    odometer_start?: number;
   }) {
     const response = await this.client.post(`/driver/trip-tickets/${id}/start`, data || {});
     return response.data.data || response.data;
@@ -396,9 +422,30 @@ class ApiService {
     end_coordinates?: string;
     end_mileage?: number;
     fuel_consumed?: number;
+    odometer_end?: number;
+    fuel_used?: number;
     completion_notes?: string;
   }) {
     const response = await this.client.post(`/driver/trip-tickets/${id}/complete`, data || {});
+    return response.data.data || response.data;
+  }
+
+  async getAvailableRefuelsForTrip(tripTicketId: number) {
+    const response = await this.client.get(`/driver/trip-tickets/${tripTicketId}/available-refuels`);
+    return response.data.available_refuels || [];
+  }
+
+  async linkRefuelsToTrip(tripTicketId: number, refuelIds: number[]) {
+    const response = await this.client.post(`/driver/trip-tickets/${tripTicketId}/link-refuels`, {
+      refuel_ids: refuelIds
+    });
+    return response.data;
+  }
+
+  async cancelTripEmergency(id: number, cancellation_reason: string) {
+    const response = await this.client.post(`/driver/trip-tickets/${id}/cancel-emergency`, {
+      cancellation_reason
+    });
     return response.data.data || response.data;
   }
 
@@ -569,6 +616,9 @@ class ApiService {
     date: string;
     amount: number;
     fuel_type: string;
+    purpose?: string | null;
+    odometer?: number | null;
+    type?: 'add' | 'usage';
   }) {
     const response = await this.client.post('/driver/fuel-records', data);
     return response.data;
@@ -662,6 +712,42 @@ class ApiService {
 
   async getVehicleAvailability() {
     const response = await this.client.get('/director/vehicle-availability');
+    return response.data;
+  }
+
+  // Fuel tracking endpoints
+  async getVehicleFuelStatus(vehicleId: number) {
+    const response = await this.client.get(`/driver/vehicles/${vehicleId}/fuel-status`);
+    return response.data;
+  }
+
+  async recordRefuel(data: {
+    vehicle_id: number;
+    liters_added: number;
+    pos_control_number?: string;
+    trip_ticket_id?: number;
+    cost?: number;
+    fuel_type?: string;
+    location?: string;
+    odometer_reading?: number;
+    gas_station?: string;
+    notes?: string;
+  }) {
+    const response = await this.client.post('/driver/vehicles/refuel', data);
+    return response.data;
+  }
+
+  async getVehicleFuelHistory(vehicleId: number) {
+    const response = await this.client.get(`/driver/vehicles/${vehicleId}/fuel-history`);
+    return response.data;
+  }
+
+  async updateFuelConsumption(vehicleId: number, data: {
+    liters_consumed: number;
+    trip_ticket_id?: number;
+    notes?: string;
+  }) {
+    const response = await this.client.patch(`/driver/vehicles/${vehicleId}/fuel-consumption`, data);
     return response.data;
   }
 }

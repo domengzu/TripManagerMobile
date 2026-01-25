@@ -24,6 +24,7 @@ import { ConfirmationModal } from '@/components/ConfirmationModal';
 import { SuccessModal } from '@/components/SuccessModal';
 import { useModals } from '@/hooks/useModals';
 import { NotificationBellButton } from '@/components/NotificationBellButton';
+import Constants from 'expo-constants';
 
 const { width } = Dimensions.get('window');
 
@@ -72,6 +73,15 @@ export default function ProfileScreen() {
       setProfileImage(user.profile_picture || null);
     }
   }, [user]);
+
+  // Get app version dynamically from expo constants
+  const appVersion = Constants.expoConfig?.version || '1.0.0';
+  
+  // Get last updated date (month and year)
+  const getLastUpdated = () => {
+    const currentDate = new Date();
+    return currentDate.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  };
 
   const handleLogout = () => {
     showConfirmation({
@@ -692,16 +702,29 @@ export default function ProfileScreen() {
           
           {/* Trip Log History - Only for drivers */}
           {user?.role === 'driver' && (
-            <TouchableOpacity 
-              style={styles.quickActionButton}
-              onPress={() => router.push('/trip-log-history')}
-            >
-              <View style={styles.quickActionContent}>
-                <Icon name="receipt" size={20} color="#3b82f6" />
-                <Text style={styles.quickActionText}>History Reports</Text>
-              </View>
-              <Icon name="chevron-forward" size={16} color="#9ca3af" />
-            </TouchableOpacity>
+            <>
+              <TouchableOpacity 
+                style={styles.quickActionButton}
+                onPress={() => router.push('/trip-log-history')}
+              >
+                <View style={styles.quickActionContent}>
+                  <Icon name="receipt" size={20} color="#3b82f6" />
+                  <Text style={styles.quickActionText}>History Reports</Text>
+                </View>
+                <Icon name="chevron-forward" size={16} color="#9ca3af" />
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={styles.quickActionButton}
+                onPress={() => router.push('/fuel-usage-history')}
+              >
+                <View style={styles.quickActionContent}>
+                  <Icon name="water" size={20} color="#3b82f6" />
+                  <Text style={styles.quickActionText}>Fuel Usage History</Text>
+                </View>
+                <Icon name="chevron-forward" size={16} color="#9ca3af" />
+              </TouchableOpacity>
+            </>
           )}
           
           {/* Help & Support - Available for everyone */}
@@ -723,11 +746,11 @@ export default function ProfileScreen() {
           <View style={styles.appInfoCard}>
             <View style={styles.detailRow}>
               <Text style={styles.detailLabel}>Version</Text>
-              <Text style={styles.detailValue}>1.0.0</Text>
+              <Text style={styles.detailValue}>{appVersion}</Text>
             </View>
             <View style={styles.detailRow}>
               <Text style={styles.detailLabel}>Last Updated</Text>
-              <Text style={styles.detailValue}>October 2025</Text>
+              <Text style={styles.detailValue}>{getLastUpdated()}</Text>
             </View>
           </View>
         </View>

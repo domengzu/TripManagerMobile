@@ -32,7 +32,6 @@ export interface Notification {
     destinations?: string;
     approver_name?: string;
     driver_name?: string;
-    procurement_status?: string;
     [key: string]: any;
   };
   read_at: string | null;
